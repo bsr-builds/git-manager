@@ -148,7 +148,6 @@ echo "Cloudflare Tunnel: $TUNNEL_URL"
 
 # Deploy the Worker using only the Worker name variable.
 mkdir -p "$WORKER_DIR/src"
-cp worker/src/index.js "$WORKER_DIR/src/index.js"
 cat > "$WORKER_DIR/wrangler.toml" <<WRANGLER
 name = "${WORKER_NAME}"
 main = "src/index.js"
