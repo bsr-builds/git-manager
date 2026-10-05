@@ -153,6 +153,9 @@ name = "${WORKER_NAME}"
 main = "src/index.js"
 compatibility_date = "2026-10-01"
 workers_dev = true
+
+[vars]
+TUNNEL_URL = "${TUNNEL_URL}"
 WRANGLER
 
 export CLOUDFLARE_API_TOKEN
@@ -167,9 +170,11 @@ if [[ -z "$WORKER_URL" ]]; then
   exit 1
 fi
 
-# Secrets are stored in the Worker, not in the repository.
+# WORKER_SECRET is sensitive and is stored as a Worker secret.
+# TUNNEL_URL is non-secret and is deployed as a Worker variable above so the
+# Worker is fully configured in the same deployment instead of relying on a
+# post-deploy secret propagation step.
 printf '%s' "$WORKER_SECRET" | npx --yes wrangler@latest secret put WORKER_SECRET --name "$WORKER_NAME" >/dev/null
-printf '%s' "$TUNNEL_URL" | npx --yes wrangler@latest secret put TUNNEL_URL --name "$WORKER_NAME" >/dev/null
 
 # Restart the app with the exact Worker URL so GitHub OAuth always returns to
 # the Worker. The server IP/port is never used as the public callback URL.
