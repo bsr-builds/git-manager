@@ -60,4 +60,4 @@ jobs:
             GITHUB_CLIENT_SECRET="$GITHUB_CLIENT_SECRET" \
             FLASK_SECRET_KEY="$FLASK_SECRET_KEY" \
             CLOUDFLARE_API_TOKEN="$CLOUDFLARE_API_TOKEN" \
-            ./deploy.sh
+            bash ./deploy.sh
