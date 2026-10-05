@@ -33,7 +33,6 @@ jobs:
           key: ${{ secrets.SERVER_SSH_KEY }}
           port: ${{ vars.SERVER_SSH_PORT || '22' }}
           envs: WORKER_NAME,APP_PORT,GATEKEEPER_PORT,DOCKER_CONTAINER,GITHUB_CLIENT_ID,GITHUB_CLIENT_SECRET,FLASK_SECRET_KEY,CLOUDFLARE_API_TOKEN
-          script_stop: true
           script: |
             set -e
 
