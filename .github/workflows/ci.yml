@@ -1,0 +1,63 @@
+name: Build and Deploy Git Manager
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: git-manager-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Deploy to Ubuntu server
+        uses: appleboy/ssh-action@v1.2.2
+        env:
+          WORKER_NAME: ${{ vars.WORKER_NAME }}
+          APP_PORT: ${{ vars.APP_PORT }}
+          GATEKEEPER_PORT: ${{ vars.GATEKEEPER_PORT }}
+          DOCKER_CONTAINER: ${{ vars.DOCKER_CONTAINER }}
+          GITHUB_CLIENT_ID: ${{ secrets.GH_CLIENT_ID }}
+          GITHUB_CLIENT_SECRET: ${{ secrets.GH_CLIENT_SECRET }}
+          FLASK_SECRET_KEY: ${{ secrets.FLASK_SECRET_KEY }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: ${{ vars.SERVER_SSH_PORT || '22' }}
+          envs: WORKER_NAME,APP_PORT,GATEKEEPER_PORT,DOCKER_CONTAINER,GITHUB_CLIENT_ID,GITHUB_CLIENT_SECRET,FLASK_SECRET_KEY,CLOUDFLARE_API_TOKEN
+          script_stop: true
+          script: |
+            set -e
+
+            SERVER_PATH="${HOME}/git-manager"
+            mkdir -p "$SERVER_PATH"
+            cd "$SERVER_PATH"
+
+            if [ ! -d .git ]; then
+              git init
+              git remote add origin "https://github.com/${{ github.repository }}.git"
+            fi
+
+            git remote set-url origin "https://github.com/${{ github.repository }}.git"
+            git fetch --prune origin master
+            git checkout -B master origin/master
+            git reset --hard origin/master
+            git clean -fd
+
+            WORKER_NAME="${WORKER_NAME:-git-manager}" \
+            APP_PORT="${APP_PORT:-}" \
+            GATEKEEPER_PORT="${GATEKEEPER_PORT:-10000}" \
+            DOCKER_CONTAINER="${DOCKER_CONTAINER:-git-manager}" \
+            GITHUB_CLIENT_ID="$GITHUB_CLIENT_ID" \
+            GITHUB_CLIENT_SECRET="$GITHUB_CLIENT_SECRET" \
+            FLASK_SECRET_KEY="$FLASK_SECRET_KEY" \
+            CLOUDFLARE_API_TOKEN="$CLOUDFLARE_API_TOKEN" \
+            ./deploy.sh

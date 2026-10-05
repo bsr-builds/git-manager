@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GitHub Commit Manager</title>
+    <!-- Bootstrap 5 -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+    <style>
+        :root {
+            --app-font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+        body {
+            background-color: #f8f9fa;
+            font-family: var(--app-font);
+            font-size: 14px;
+            color: #212529;
+        }
+
+        /* Mobile Typography & Compact Sizing */
+        @media (max-width: 768px) {
+            body {
+                font-size: 13px;
+            }
+            .navbar-brand {
+                font-size: 0.95rem;
+            }
+            h2, .h2 { font-size: 1.35rem; }
+            h3, .h3 { font-size: 1.2rem; }
+            h4, .h4 { font-size: 1.05rem; }
+            h5, .h5 { font-size: 0.95rem; }
+            .card-body {
+                padding: 0.75rem;
+            }
+            .card-header {
+                padding: 0.6rem 0.75rem;
+            }
+            .btn {
+                font-size: 0.82rem;
+                padding: 0.35rem 0.65rem;
+            }
+            .btn-lg {
+                font-size: 0.95rem;
+                padding: 0.55rem 1.1rem;
+            }
+            .form-control, .form-select {
+                font-size: 0.85rem;
+            }
+            .modal-body {
+                font-size: 0.82rem;
+                padding: 0.85rem;
+            }
+            .container {
+                padding-left: 0.75rem;
+                padding-right: 0.75rem;
+            }
+        }
+
+        @media (max-width: 480px) {
+            body {
+                font-size: 12px;
+            }
+            .sha-badge {
+                font-size: 0.7rem !important;
+                padding: 0.2rem 0.35rem !important;
+            }
+            .commit-meta {
+                font-size: 0.7rem !important;
+            }
+            .commit-msg {
+                font-size: 0.82rem !important;
+            }
+        }
+
+        .sha-badge {
+            font-family: SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            font-size: 0.78rem;
+        }
+        .commit-row:hover {
+            background-color: #f1f3f5;
+        }
+        .commit-checkbox {
+            width: 1.15rem;
+            height: 1.15rem;
+            cursor: pointer;
+        }
+        .truncate-text {
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark py-2 shadow-sm">
+        <div class="container">
+            <a class="navbar-brand fw-semibold d-flex align-items-center" href="{{ url_for('index') }}">
+                <i class="bi bi-github me-2 fs-5"></i>
+                <span>Commit Manager</span>
+            </a>
+            <div class="ms-auto d-flex align-items-center">
+                {% if session.get('user') %}
+                    <div class="d-flex align-items-center text-light me-2 me-sm-3">
+                        <img src="{{ session['user']['avatar_url'] }}" width="24" height="24" class="rounded-circle me-1 border border-secondary" alt="Avatar">
+                        <span class="small d-none d-sm-inline">{{ session['user']['login'] }}</span>
+                    </div>
+                    <a href="{{ url_for('logout') }}" class="btn btn-outline-light btn-sm py-1 px-2">Logout</a>
+                {% endif %}
+            </div>
+        </div>
+    </nav>
+
+    <div class="container my-3 my-sm-4">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="alert alert-{{ category }} alert-dismissible fade show small py-2" role="alert">
+                        {{ message }}
+                        <button type="button" class="btn-close py-2" data-bs-dismiss="alert"></button>
+                    </div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        {% block content %}{% endblock %}
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>
