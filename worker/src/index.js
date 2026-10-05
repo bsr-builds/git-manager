@@ -1,31 +1,23 @@
 export default {
   async fetch(request, env) {
-    const url = new URL(request.url);
-
-    // The Worker forwards to the existing Cloudflare Named Tunnel hostname.
-    // CLOUDFLARE_ORIGIN_HOST should be only the hostname, e.g.
-    // git-manager-origin.example.com
-    if (!env.CLOUDFLARE_ORIGIN_HOST) {
-      return new Response("CLOUDFLARE_ORIGIN_HOST is not configured.", {
-        status: 500,
-      });
+    if (!env.TUNNEL_URL) {
+      return new Response("Cloudflare Tunnel is not configured.", { status: 503 });
     }
 
-    url.hostname = env.CLOUDFLARE_ORIGIN_HOST;
-    url.protocol = "https:";
+    const incoming = new URL(request.url);
+    const origin = new URL(env.TUNNEL_URL);
+    origin.pathname = incoming.pathname;
+    origin.search = incoming.search;
 
     const headers = new Headers(request.headers);
-
     if (env.WORKER_SECRET) {
       headers.set("X-Worker-Secret", env.WORKER_SECRET);
     }
 
-    return fetch(new Request(url, {
+    return fetch(new Request(origin, {
       method: request.method,
       headers,
-      body: request.method === "GET" || request.method === "HEAD"
-        ? undefined
-        : request.body,
+      body: request.method === "GET" || request.method === "HEAD" ? undefined : request.body,
       redirect: "follow",
     }));
   },
