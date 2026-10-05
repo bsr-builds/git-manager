@@ -12,27 +12,54 @@ export default {
       origin.search = incoming.search;
 
       const headers = new Headers(request.headers);
-      headers.delete("host");
+      headers.set("Host", origin.host);
+      headers.set("X-Forwarded-Host", incoming.host);
+      headers.set("X-Forwarded-Proto", incoming.protocol.replace(":", ""));
       headers.delete("content-length");
 
       if (env.WORKER_SECRET) {
         headers.set("X-Worker-Secret", env.WORKER_SECRET);
       }
 
+      // Read body as ArrayBuffer to prevent stream lock issues on POST redirects
+      let body = null;
+      if (request.method !== "GET" && request.method !== "HEAD") {
+        body = await request.arrayBuffer();
+      }
+
       const init = {
         method: request.method,
         headers,
-        redirect: "follow",
+        body,
+        redirect: "manual", // CRITICAL: Do NOT follow redirects internally
       };
 
-      if (request.method !== "GET" && request.method !== "HEAD") {
-        init.body = request.body;
+      const response = await fetch(origin.toString(), init);
+
+      // Clone response headers to handle redirects and cookies properly
+      const responseHeaders = new Headers(response.headers);
+
+      // If backend redirects to internal tunnel URL, rewrite it back to Worker domain
+      const location = responseHeaders.get("location");
+      if (location) {
+        try {
+          const locUrl = new URL(location, origin.origin);
+          if (locUrl.origin === origin.origin) {
+            responseHeaders.set("location", incoming.origin + locUrl.pathname + locUrl.search);
+          }
+        } catch (e) {
+          // relative paths work automatically in browsers
+        }
       }
 
-      return await fetch(origin.toString(), init);
+      return new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: responseHeaders,
+      });
     } catch (error) {
       console.error("Worker proxy error:", error);
-      return new Response("Worker proxy error", { status: 502 });
+      return new Response("Worker proxy error: " + (error.stack || error.message), { status: 502 });
     }
   },
 };
