@@ -1,0 +1,927 @@
+{% extends "base.html" %}
+{% block content %}
+<style>
+    @keyframes pulse-anim {
+        0% { opacity: 1; transform: scale(1); }
+        50% { opacity: 0.35; transform: scale(0.85); }
+        100% { opacity: 1; transform: scale(1); }
+    }
+    .pulse-dot {
+        display: inline-block;
+        font-size: 0.55rem;
+        animation: pulse-anim 1.8s infinite ease-in-out;
+    }
+    .live-badge {
+        font-size: 0.72rem;
+        letter-spacing: 0.3px;
+    }
+    .ci-badge-slot {
+        transition: opacity 0.2s ease;
+    }
+    .commit-row {
+        transition: background-color 0.15s ease;
+    }
+    .commit-clickable {
+        cursor: pointer;
+    }
+    .commit-clickable:hover .commit-msg {
+        color: #0969da !important;
+        text-decoration: underline;
+    }
+
+    /* Diff Viewer Styling */
+    .diff-container {
+        font-family: SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        font-size: 0.75rem;
+        line-height: 1.4;
+    }
+    .diff-table {
+        width: 100%;
+        border-collapse: collapse;
+    }
+    .diff-table td {
+        padding: 1px 4px;
+        vertical-align: top;
+        white-space: pre-wrap;
+        word-break: break-all;
+    }
+    .diff-line-num {
+        width: 40px;
+        text-align: right;
+        color: #8c959f;
+        user-select: none;
+        font-size: 0.7rem;
+        padding-right: 8px !important;
+        border-right: 1px solid #d0d7de;
+    }
+    .diff-line-marker {
+        width: 20px;
+        text-align: center;
+        user-select: none;
+        font-weight: bold;
+    }
+    .diff-add {
+        background-color: #e6ffec;
+        color: #1a7f37;
+    }
+    .diff-del {
+        background-color: #ffebe9;
+        color: #cf222e;
+    }
+    .diff-chunk {
+        background-color: #f6f8fa;
+        color: #0969da;
+        font-style: italic;
+    }
+    .file-tree-item {
+        cursor: pointer;
+        padding: 5px 8px;
+        border-radius: 4px;
+        transition: background-color 0.12s ease;
+        font-size: 0.8rem;
+    }
+    .file-tree-item:hover {
+        background-color: #f1f3f5;
+    }
+    .file-tree-item.active {
+        background-color: #e7f5ff;
+        color: #0066cc;
+        font-weight: 600;
+    }
+    .modal-fullscreen-custom {
+        max-width: 95vw !important;
+    }
+    @media (max-width: 768px) {
+        .modal-fullscreen-custom {
+            max-width: 100vw !important;
+            margin: 0 !important;
+        }
+    }
+</style>
+
+<div class="d-flex flex-column flex-md-row justify-content-between align-items-start align-items-md-center gap-2 mb-3">
+    <div>
+        <nav aria-label="breadcrumb">
+            <ol class="breadcrumb mb-1" style="font-size: 0.8rem;">
+                <li class="breadcrumb-item"><a href="{{ url_for('list_repos') }}" class="text-decoration-none">Repositories</a></li>
+                <li class="breadcrumb-item active text-truncate" style="max-width: 240px;">{{ owner }}/{{ repo }}</li>
+            </ol>
+        </nav>
+        <div class="d-flex align-items-center gap-2">
+            <h4 class="mb-0 fw-bold">Commit History</h4>
+            <span class="badge bg-light text-success border live-badge d-flex align-items-center" id="liveIndicator">
+                <i class="bi bi-circle-fill text-success pulse-dot me-1"></i>LIVE
+            </span>
+        </div>
+    </div>
+
+    <!-- Branch selector & Restore button -->
+    <div class="d-flex align-items-center gap-2 w-100 w-md-auto">
+        <button class="btn btn-outline-success btn-sm flex-shrink-0" data-bs-toggle="modal" data-bs-target="#restoreModal">
+            <i class="bi bi-arrow-counterclockwise me-1"></i>Recover / Undo
+        </button>
+        <select class="form-select form-select-sm w-100" id="branchSelector" style="min-width: 140px;" onchange="switchBranch(this.value)">
+            {% for b in branches %}
+                <option value="{{ b.name }}" {% if b.name == branch %}selected{% endif %}>
+                    {{ b.name }}
+                </option>
+            {% endfor %}
+        </select>
+    </div>
+</div>
+
+<div class="card shadow-sm border mb-4">
+    <div class="card-header bg-white d-flex flex-column flex-sm-row justify-content-between align-items-stretch align-items-sm-center gap-2 py-2 py-sm-3">
+        <div class="d-flex align-items-center gap-2">
+            <span class="text-muted small">Select commit(s) to remove, or click any commit to inspect line diff:</span>
+            <span id="syncSpinner" class="spinner-border spinner-border-sm text-success d-none" role="status" style="width: 0.85rem; height: 0.85rem;"></span>
+        </div>
+        <button id="deleteBtn" class="btn btn-danger btn-sm" disabled data-bs-toggle="modal" data-bs-target="#confirmModal">
+            <i class="bi bi-trash3 me-1"></i>Remove Selected (<span id="selectedCount">0</span>)
+        </button>
+    </div>
+    <div class="card-body p-0">
+        <div class="list-group list-group-flush" id="commitListContainer">
+            {% for c in commits %}
+                <div class="list-group-item commit-row d-flex align-items-center p-2 p-sm-3 gap-2" data-sha="{{ c.sha }}">
+                    <input class="form-check-input commit-checkbox flex-shrink-0 mt-0" type="checkbox" value="{{ c.sha }}">
+                    <div class="flex-grow-1 text-break overflow-hidden pe-1 commit-clickable" onclick="inspectCommitDiff('{{ c.sha }}')">
+                        <div class="fw-semibold text-dark commit-msg text-truncate">{{ c.commit.message.split('
+')[0] }}</div>
+                        <div class="text-muted commit-meta" style="font-size: 0.75rem;">
+                            {{ c.commit.author.name }} &middot; {{ c.commit.author.date[:10] }}
+                        </div>
+                    </div>
+                    <div class="flex-shrink-0 d-flex align-items-center gap-1">
+                        <span class="ci-badge-slot">
+                            {% if c.get('ci_status') %}
+                                <span class="badge bg-{{ c.ci_status.status }} text-white" style="font-size: 0.72rem;" title="CI Checks: {{ c.ci_status.display }}">
+                                    {% if c.ci_status.is_running %}
+                                        <span class="spinner-border spinner-border-sm me-1" style="width:0.6rem;height:0.6rem;"></span>
+                                    {% elif c.ci_status.status == 'success' %}
+                                        <i class="bi bi-check-circle-fill me-1"></i>
+                                    {% elif c.ci_status.status == 'danger' %}
+                                        <i class="bi bi-x-circle-fill me-1"></i>
+                                    {% else %}
+                                        <i class="bi bi-hourglass-split me-1"></i>
+                                    {% endif %}
+                                    {{ c.ci_status.display }}
+                                </span>
+                            {% endif %}
+                        </span>
+                        <span class="badge bg-light text-dark border sha-badge commit-clickable" onclick="inspectCommitDiff('{{ c.sha }}')">{{ c.sha[:7] }}</span>
+                        <button class="btn btn-link btn-sm text-decoration-none p-0 text-muted" title="Rename this commit" onclick="event.stopPropagation(); openRenameModal('{{ c.sha }}')">
+                            <i class="bi bi-pencil-square"></i>
+                        </button>
+                        <button class="btn btn-link btn-sm text-decoration-none p-0 text-muted" title="Restore branch to this commit" onclick="event.stopPropagation(); quickRestore('{{ c.sha }}')">
+                            <i class="bi bi-arrow-clockwise"></i>
+                        </button>
+                    </div>
+                </div>
+            {% endfor %}
+            {% if not commits %}
+                <div class="p-4 text-center text-muted small" id="noCommitsMsg">
+                    No commits found on this branch.
+                </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<!-- 1. Full Commit Diff & Left File Tree Modal -->
+<div class="modal fade" id="commitDiffModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered modal-fullscreen-custom">
+        <div class="modal-content" style="height: 90vh;">
+            <div class="modal-header bg-dark text-white py-2 px-3">
+                <div class="d-flex align-items-center gap-2 text-truncate me-2">
+                    <span class="badge bg-primary text-white" id="diffShortSha">SHA</span>
+                    <h6 class="modal-title mb-0 text-truncate fw-semibold" id="diffTitle">Commit Details</h6>
+                </div>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="bg-light border-bottom px-3 py-2 d-flex flex-wrap align-items-center justify-content-between gap-2 small">
+                <div class="text-muted" id="diffMeta">Loading author and date...</div>
+                <div class="d-flex align-items-center gap-2" id="diffStats"></div>
+            </div>
+            <div class="modal-body p-0 d-flex flex-column flex-md-row overflow-hidden">
+                <div class="col-12 col-md-4 col-lg-3 border-end bg-white d-flex flex-column" style="height: 100%; max-height: 100%;">
+                    <div class="p-2 border-bottom">
+                        <input type="text" id="fileTreeSearch" class="form-control form-control-sm" placeholder="Filter changed files...">
+                    </div>
+                    <div class="overflow-auto p-2 flex-grow-1" id="fileTreeContainer">
+                        <div class="text-center text-muted small p-3">Loading files tree...</div>
+                    </div>
+                </div>
+                <div class="col-12 col-md-8 col-lg-9 bg-white overflow-auto p-3 flex-grow-1" id="diffContentContainer" style="height: 100%;">
+                    <div class="text-center text-muted p-5">
+                        <span class="spinner-border spinner-border-sm me-2"></span>Loading line diff details...
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer py-1 px-3 bg-light d-flex justify-content-between">
+                <span class="text-muted" style="font-size: 0.75rem;">
+                    <span class="badge bg-success-subtle text-success border border-success-subtle me-1">+ Picked lines</span>
+                    <span class="badge bg-danger-subtle text-danger border border-danger-subtle">- Dropped lines</span>
+                </span>
+                <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 2. Deletion Confirmation Modal -->
+<div class="modal fade" id="confirmModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered modal-lg">
+        <div class="modal-content">
+            <div class="modal-header bg-danger text-white py-2 py-sm-3">
+                <h6 class="modal-title fw-bold mb-0">
+                    <i class="bi bi-exclamation-triangle-fill me-2"></i>Confirm Commit Removal
+                </h6>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div id="removalFormSection">
+                    <div class="alert alert-info py-2 mb-3" style="font-size: 0.82rem;">
+                        <i class="bi bi-shield-lock-fill me-1"></i>
+                        <strong>Automated Safety Backup:</strong> A recovery snapshot tag is created before applying changes.
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label fw-bold small">Choose Removal Strategy:</label>
+                        <div class="form-check p-2 border rounded bg-light mb-2">
+                            <input class="form-check-input ms-1" type="radio" name="strategy" id="strategyDropOnly" value="absorb_code_drop_history" checked>
+                            <label class="form-check-label ms-2 small" for="strategyDropOnly">
+                                <strong>Drop Selected & Absorb Code into Next Commit (Zero Conflicts)</strong><br>
+                                <span class="text-muted">Drops selected commits from history, absorbs their changes into the next commit, and keeps latest code 100% untouched without any conflicts.</span>
+                            </label>
+                        </div>
+                        <div class="form-check p-2 border rounded bg-light mb-2">
+                            <input class="form-check-input ms-1" type="radio" name="strategy" id="strategyPreserve" value="preserve_files">
+                            <label class="form-check-label ms-2 small" for="strategyPreserve">
+                                <strong>Preserve All Current Project Files (100% Conflict-Free)</strong><br>
+                                <span class="text-muted">Guarantees zero conflicts by saving the exact HEAD working files and creating a clean replacement commit.</span>
+                            </label>
+                        </div>
+                        <div class="form-check p-2 border rounded bg-light">
+                            <input class="form-check-input ms-1" type="radio" name="strategy" id="strategyRollback" value="rollback_to_base">
+                            <label class="form-check-label ms-2 small" for="strategyRollback">
+                                <strong>Rollback Branch Pointer</strong><br>
+                                <span class="text-muted">Rolls back GitHub branch pointer to the commit preceding the selected ones.</span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="mb-3 d-none" id="msgContainer">
+                        <label class="form-label fw-semibold small">New Commit Summary:</label>
+                        <input type="text" id="customMsg" class="form-control form-control-sm" value="Clean history (removed unwanted commits)">
+                    </div>
+                </div>
+
+                <div id="resultContainer" class="d-none">
+                    <div class="alert alert-success py-2">
+                        <strong class="small"><i class="bi bi-check-circle-fill me-1"></i>Operation Succeeded! List Updated Live.</strong>
+                        <p class="mb-1 mt-2 small">Run these commands in your local project terminal to synchronize:</p>
+                        <pre class="bg-dark text-white p-2 p-sm-3 rounded small mb-0 overflow-auto" id="syncCommands" style="font-size: 0.75rem;"></pre>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer py-2">
+                <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal" id="modalCloseBtn">Close</button>
+                <button type="button" id="executeBtn" class="btn btn-danger btn-sm" onclick="executeRemoval()">Confirm & Update GitHub</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 3. Restore / Recovery Modal -->
+<div class="modal fade" id="restoreModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header bg-success text-white py-2 py-sm-3">
+                <h6 class="modal-title fw-bold mb-0">
+                    <i class="bi bi-arrow-counterclockwise me-2"></i>Recover / Restore Commit
+                </h6>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div id="restoreFormSection">
+                    <p class="small text-muted mb-2">
+                        Restore your GitHub branch to any previous commit SHA or automated backup point live.
+                    </p>
+
+                    {% if last_backup_sha %}
+                        <div class="p-2 border rounded bg-light mb-3">
+                            <div class="small fw-bold text-success"><i class="bi bi-check-circle-fill me-1"></i>Last Auto-Backup Detected:</div>
+                            <div class="d-flex justify-content-between align-items-center mt-1">
+                                <code class="small text-dark">{{ last_backup_sha }}</code>
+                                <button class="btn btn-sm btn-outline-success py-0 px-2" onclick="setRestoreSha('{{ last_backup_sha }}')">Use This</button>
+                            </div>
+                        </div>
+                    {% endif %}
+
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold small">Target Commit SHA to Restore:</label>
+                        <input type="text" id="targetRestoreSha" class="form-control form-control-sm" placeholder="e.g. 6b89b24 or full 40-char SHA">
+                    </div>
+                </div>
+
+                <div id="restoreResult" class="d-none">
+                    <div class="alert alert-success py-2 small">
+                        <strong><i class="bi bi-check-circle-fill me-1"></i>Branch Restored Live!</strong>
+                        <p class="mb-1 mt-1">Run this locally to match the restored GitHub branch:</p>
+                        <pre class="bg-dark text-white p-2 rounded small mb-0" id="restoreSync"></pre>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer py-2">
+                <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal" id="restoreCloseBtn">Close</button>
+                <button type="button" id="restoreBtn" class="btn btn-success btn-sm" onclick="executeRestore()">Restore Branch Now</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 4. Rename Commit Modal -->
+<div class="modal fade" id="renameModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header bg-primary text-white py-2 px-3">
+                <h6 class="modal-title fw-bold mb-0">
+                    <i class="bi bi-pencil-square me-2"></i>Rename Commit Message
+                </h6>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div id="renameFormSection">
+                    <div class="d-flex align-items-center gap-2 mb-2">
+                        <span class="badge bg-light text-dark border font-monospace" id="renameTargetSha">SHA</span>
+                        <span class="text-muted small">Update the commit message on GitHub:</span>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold small">New Commit Message:</label>
+                        <textarea id="newCommitMsgInput" class="form-control form-control-sm" rows="3" placeholder="Enter new commit message..."></textarea>
+                    </div>
+                    <div class="small text-muted" style="font-size: 0.75rem;">
+                        <i class="bi bi-shield-check text-success me-1"></i>
+                        Zero file changes &middot; Original author and date preserved intact
+                    </div>
+                </div>
+
+                <div id="renameResult" class="d-none">
+                    <div class="alert alert-success py-2 small">
+                        <strong><i class="bi bi-check-circle-fill me-1"></i>Commit Renamed Live!</strong>
+                        <p class="mb-1 mt-1">Run this locally to sync the renamed commit:</p>
+                        <pre class="bg-dark text-white p-2 rounded small mb-0" id="renameSync"></pre>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer py-2">
+                <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal" id="renameCloseBtn">Close</button>
+                <button type="button" id="saveRenameBtn" class="btn btn-primary btn-sm" onclick="executeRename()">Update Commit Message</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    let currentBranch = "{{ branch }}";
+    const owner = "{{ owner }}";
+    const repo = "{{ repo }}";
+    let isPolling = false;
+
+    function bindCheckboxes() {
+        const checkboxes = document.querySelectorAll('.commit-checkbox');
+        const deleteBtn = document.getElementById('deleteBtn');
+        const selectedCountSpan = document.getElementById('selectedCount');
+
+        checkboxes.forEach(box => {
+            box.onchange = () => {
+                const count = document.querySelectorAll('.commit-checkbox:checked').length;
+                selectedCountSpan.textContent = count;
+                deleteBtn.disabled = count === 0;
+            };
+        });
+    }
+    bindCheckboxes();
+
+    document.querySelectorAll('input[name="strategy"]').forEach(r => {
+        r.addEventListener('change', () => {
+            const msgContainer = document.getElementById('msgContainer');
+            if (document.getElementById('strategyPreserve').checked) {
+                msgContainer.classList.remove('d-none');
+            } else {
+                msgContainer.classList.add('d-none');
+            }
+        });
+    });
+
+    function resetConfirmModal() {
+        document.getElementById('removalFormSection').classList.remove('d-none');
+        document.getElementById('resultContainer').classList.add('d-none');
+        const execBtn = document.getElementById('executeBtn');
+        execBtn.classList.remove('d-none');
+        execBtn.disabled = false;
+        execBtn.innerHTML = 'Confirm & Update GitHub';
+        document.getElementById('modalCloseBtn').textContent = 'Close';
+    }
+    const confirmModalEl = document.getElementById('confirmModal');
+    if (confirmModalEl) {
+        confirmModalEl.addEventListener('show.bs.modal', resetConfirmModal);
+        confirmModalEl.addEventListener('hidden.bs.modal', resetConfirmModal);
+    }
+
+    function resetRestoreModal() {
+        document.getElementById('restoreFormSection').classList.remove('d-none');
+        document.getElementById('restoreResult').classList.add('d-none');
+        const rBtn = document.getElementById('restoreBtn');
+        rBtn.classList.remove('d-none');
+        rBtn.disabled = false;
+        rBtn.innerHTML = 'Restore Branch Now';
+        document.getElementById('restoreCloseBtn').textContent = 'Close';
+        document.getElementById('targetRestoreSha').value = '';
+    }
+    const restoreModalEl = document.getElementById('restoreModal');
+    if (restoreModalEl) {
+        restoreModalEl.addEventListener('show.bs.modal', resetRestoreModal);
+        restoreModalEl.addEventListener('hidden.bs.modal', resetRestoreModal);
+    }
+
+    const renameModalEl = document.getElementById('renameModal');
+    if (renameModalEl) {
+        renameModalEl.addEventListener('hidden.bs.modal', function () {
+            document.getElementById('renameFormSection').classList.remove('d-none');
+            document.getElementById('renameResult').classList.add('d-none');
+            const saveBtn = document.getElementById('saveRenameBtn');
+            if (saveBtn) {
+                saveBtn.classList.remove('d-none');
+                saveBtn.disabled = false;
+                saveBtn.innerHTML = 'Update Commit Message';
+            }
+            const closeBtn = document.getElementById('renameCloseBtn');
+            if (closeBtn) closeBtn.textContent = 'Close';
+            const input = document.getElementById('newCommitMsgInput');
+            if (input) input.value = '';
+        });
+    }
+
+    function buildCiBadgeHtml(ci) {
+        if (!ci) return '';
+        const icon = ci.is_running 
+            ? `<span class="spinner-border spinner-border-sm me-1" style="width:0.6rem;height:0.6rem;"></span>` 
+            : (ci.status === 'success' 
+                ? `<i class="bi bi-check-circle-fill me-1"></i>` 
+                : (ci.status === 'danger' 
+                    ? `<i class="bi bi-x-circle-fill me-1"></i>` 
+                    : `<i class="bi bi-hourglass-split me-1"></i>`));
+
+        return `<span class="badge bg-${ci.status} text-white" style="font-size: 0.72rem;" title="CI Checks: ${ci.display}">
+            ${icon}${ci.display}
+        </span>`;
+    }
+
+    async function fetchLiveCommits() {
+        if (isPolling) return;
+        isPolling = true;
+
+        try {
+            const res = await fetch(`/api/repo/${owner}/${repo}/commits?branch=${encodeURIComponent(currentBranch)}`);
+            if (!res.ok) return;
+
+            const data = await res.json();
+            const commits = data.commits || [];
+            updateCommitsDOMSoft(commits);
+        } catch (e) {
+            console.warn("Live poll skipped:", e);
+        } finally {
+            isPolling = false;
+        }
+    }
+
+    function updateCommitsDOMSoft(commits) {
+        const container = document.getElementById('commitListContainer');
+        if (!container) return;
+
+        const currentRows = Array.from(container.querySelectorAll('.commit-row'));
+        const currentShas = currentRows.map(r => r.getAttribute('data-sha'));
+        const newShas = commits.map(c => c.sha);
+
+        const isStructureIdentical = currentShas.length === newShas.length && 
+            currentShas.every((sha, idx) => sha === newShas[idx]);
+
+        if (isStructureIdentical) {
+            commits.forEach(c => {
+                const row = container.querySelector(`.commit-row[data-sha="${c.sha}"]`);
+                if (row) {
+                    const badgeSlot = row.querySelector('.ci-badge-slot');
+                    const newBadgeHtml = buildCiBadgeHtml(c.ci_status);
+                    if (badgeSlot && badgeSlot.innerHTML.trim() !== newBadgeHtml.trim()) {
+                        badgeSlot.innerHTML = newBadgeHtml;
+                    }
+                }
+            });
+            return;
+        }
+
+        const checkedShas = new Set(
+            Array.from(document.querySelectorAll('.commit-checkbox:checked')).map(cb => cb.value)
+        );
+
+        if (commits.length === 0) {
+            container.innerHTML = `<div class="p-4 text-center text-muted small">No commits found on this branch.</div>`;
+            return;
+        }
+
+        let html = '';
+        commits.forEach(c => {
+            const isChecked = checkedShas.has(c.sha) ? 'checked' : '';
+            const ciBadge = buildCiBadgeHtml(c.ci_status);
+
+            html += `
+                <div class="list-group-item commit-row d-flex align-items-center p-2 p-sm-3 gap-2" data-sha="${c.sha}">
+                    <input class="form-check-input commit-checkbox flex-shrink-0 mt-0" type="checkbox" value="${c.sha}" ${isChecked}>
+                    <div class="flex-grow-1 text-break overflow-hidden pe-1 commit-clickable" onclick="inspectCommitDiff('${c.sha}')">
+                        <div class="fw-semibold text-dark commit-msg text-truncate">${escapeHtml(c.message)}</div>
+                        <div class="text-muted commit-meta" style="font-size: 0.75rem;">
+                            ${escapeHtml(c.author_name)} &middot; ${c.date}
+                        </div>
+                    </div>
+                    <div class="flex-shrink-0 d-flex align-items-center gap-1">
+                        <span class="ci-badge-slot">${ciBadge}</span>
+                        <span class="badge bg-light text-dark border sha-badge commit-clickable" onclick="inspectCommitDiff('${c.sha}')">${c.short_sha}</span>
+                        <button class="btn btn-link btn-sm text-decoration-none p-0 text-muted" title="Rename this commit" onclick="event.stopPropagation(); openRenameModal('${c.sha}')">
+                            <i class="bi bi-pencil-square"></i>
+                        </button>
+                        <button class="btn btn-link btn-sm text-decoration-none p-0 text-muted" title="Restore branch to this commit" onclick="event.stopPropagation(); quickRestore('${c.sha}')">
+                            <i class="bi bi-arrow-clockwise"></i>
+                        </button>
+                    </div>
+                </div>
+            `;
+        });
+
+        container.innerHTML = html;
+        bindCheckboxes();
+
+        const count = document.querySelectorAll('.commit-checkbox:checked').length;
+        document.getElementById('selectedCount').textContent = count;
+        document.getElementById('deleteBtn').disabled = count === 0;
+    }
+
+    function escapeHtml(str) {
+        if (!str) return '';
+        return str.replace(/[&<>'"]/g, tag => ({
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            "'": '&#39;',
+            '"': '&quot;'
+        }[tag] || tag));
+    }
+
+    // Smart polling: runs every 7s only when page is active/visible
+    setInterval(() => {
+        if (!document.hidden) {
+            fetchLiveCommits();
+        }
+    }, 7000);
+
+    function switchBranch(newBranch) {
+        currentBranch = newBranch;
+        const spinner = document.getElementById('syncSpinner');
+        spinner.classList.remove('d-none');
+        fetchLiveCommits().then(() => spinner.classList.add('d-none'));
+    }
+
+    let renameSha = "";
+    function openRenameModal(sha) {
+        renameSha = sha;
+        document.getElementById('renameTargetSha').textContent = sha.substring(0, 7);
+
+        const row = document.querySelector(`.commit-row[data-sha="${sha}"]`);
+        const currentMsg = row ? row.querySelector('.commit-msg').textContent.trim() : '';
+        document.getElementById('newCommitMsgInput').value = currentMsg;
+
+        document.getElementById('renameFormSection').classList.remove('d-none');
+        document.getElementById('renameResult').classList.add('d-none');
+        const saveBtn = document.getElementById('saveRenameBtn');
+        saveBtn.classList.remove('d-none');
+        saveBtn.disabled = false;
+        saveBtn.innerHTML = 'Update Commit Message';
+        document.getElementById('renameCloseBtn').textContent = 'Close';
+
+        const modalEl = document.getElementById('renameModal');
+        const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+        modal.show();
+    }
+
+    async function executeRename() {
+        const newMsg = document.getElementById('newCommitMsgInput').value.trim();
+        const saveBtn = document.getElementById('saveRenameBtn');
+
+        if (!newMsg) {
+            alert("Commit message cannot be empty.");
+            return;
+        }
+
+        saveBtn.disabled = true;
+        saveBtn.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span>Updating on GitHub...`;
+
+        try {
+            const response = await fetch(`/repo/${owner}/${repo}/rename-commit`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    branch: currentBranch,
+                    target_sha: renameSha,
+                    new_message: newMsg
+                })
+            });
+
+            const result = await response.json();
+            if (result.success) {
+                document.getElementById('renameFormSection').classList.add('d-none');
+                document.getElementById('renameResult').classList.remove('d-none');
+                document.getElementById('renameSync').textContent = result.local_sync_instructions.join('\n');
+                saveBtn.classList.add('d-none');
+                document.getElementById('renameCloseBtn').textContent = 'Done';
+
+                await fetchLiveCommits();
+            } else {
+                alert("Error: " + result.error);
+                saveBtn.disabled = false;
+                saveBtn.innerHTML = 'Update Commit Message';
+            }
+        } catch (err) {
+            alert("Network error.");
+            saveBtn.disabled = false;
+            saveBtn.innerHTML = 'Update Commit Message';
+        }
+    }
+
+    async function inspectCommitDiff(sha) {
+        const modalEl = document.getElementById('commitDiffModal');
+        const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+        modal.show();
+
+        document.getElementById('diffShortSha').textContent = sha.substring(0, 7);
+        document.getElementById('diffTitle').textContent = 'Loading commit details...';
+        document.getElementById('diffMeta').textContent = 'Fetching details from GitHub...';
+        document.getElementById('diffStats').innerHTML = '';
+        document.getElementById('fileTreeContainer').innerHTML = '<div class="text-center text-muted small p-3"><span class="spinner-border spinner-border-sm me-2"></span>Loading files...</div>';
+        document.getElementById('diffContentContainer').innerHTML = '<div class="text-center text-muted p-5"><span class="spinner-border spinner-border-sm me-2"></span>Loading diff lines...</div>';
+
+        try {
+            const res = await fetch(`/api/repo/${owner}/${repo}/commit/${sha}`);
+            if (!res.ok) {
+                document.getElementById('diffContentContainer').innerHTML = '<div class="alert alert-danger m-3">Could not fetch commit details.</div>';
+                return;
+            }
+
+            const data = await res.json();
+            document.getElementById('diffTitle').textContent = data.message;
+            document.getElementById('diffMeta').innerHTML = `<strong>${escapeHtml(data.author_name)}</strong> committed on ${data.author_date.substring(0, 10)} &middot; <code>${data.sha}</code>`;
+
+            const stats = data.stats || {};
+            document.getElementById('diffStats').innerHTML = `
+                <span class="badge bg-success-subtle text-success border border-success-subtle">+${stats.additions || 0} additions</span>
+                <span class="badge bg-danger-subtle text-danger border border-danger-subtle">-${stats.deletions || 0} deletions</span>
+                <span class="badge bg-light text-dark border">${data.files.length} files changed</span>
+            `;
+
+            renderFileTreeAndDiff(data.files);
+        } catch (e) {
+            document.getElementById('diffContentContainer').innerHTML = '<div class="alert alert-danger m-3">Error loading diff.</div>';
+        }
+    }
+
+    function renderFileTreeAndDiff(files) {
+        const treeContainer = document.getElementById('fileTreeContainer');
+        const diffContainer = document.getElementById('diffContentContainer');
+
+        if (!files || files.length === 0) {
+            treeContainer.innerHTML = '<div class="text-muted small p-2">No files changed.</div>';
+            diffContainer.innerHTML = '<div class="text-muted small p-4">No file diffs to display.</div>';
+            return;
+        }
+
+        let treeHtml = '';
+        let diffHtml = '';
+
+        files.forEach((file, index) => {
+            const fileId = `diff-file-${index}`;
+            let statusIcon = '<i class="bi bi-pencil-fill text-primary me-1"></i>';
+            if (file.status === 'added') statusIcon = '<i class="bi bi-plus-circle-fill text-success me-1"></i>';
+            if (file.status === 'removed') statusIcon = '<i class="bi bi-dash-circle-fill text-danger me-1"></i>';
+
+            treeHtml += `
+                <div class="file-tree-item text-truncate d-flex align-items-center justify-content-between" data-target="${fileId}" onclick="scrollToFile('${fileId}', this)">
+                    <div class="text-truncate me-1" title="${escapeHtml(file.filename)}">
+                        ${statusIcon}${escapeHtml(file.filename)}
+                    </div>
+                    <div class="flex-shrink-0" style="font-size: 0.7rem;">
+                        <span class="text-success">+${file.additions}</span>
+                        <span class="text-danger ms-1">-${file.deletions}</span>
+                    </div>
+                </div>
+            `;
+
+            const parsedLines = parsePatchLines(file.patch);
+            let tableRows = '';
+
+            parsedLines.forEach(l => {
+                let rowClass = '';
+                let marker = ' ';
+                if (l.type === 'add') {
+                    rowClass = 'diff-add';
+                    marker = '+';
+                } else if (l.type === 'del') {
+                    rowClass = 'diff-del';
+                    marker = '-';
+                } else if (l.type === 'chunk') {
+                    rowClass = 'diff-chunk';
+                    marker = '@';
+                }
+
+                tableRows += `
+                    <tr class="${rowClass}">
+                        <td class="diff-line-num">${l.old_ln || ''}</td>
+                        <td class="diff-line-num">${l.new_ln || ''}</td>
+                        <td class="diff-line-marker">${marker}</td>
+                        <td>${escapeHtml(l.content)}</td>
+                    </tr>
+                `;
+            });
+
+            diffHtml += `
+                <div class="card mb-4 border shadow-sm diff-container" id="${fileId}">
+                    <div class="card-header bg-light py-2 px-3 d-flex justify-content-between align-items-center">
+                        <span class="fw-bold text-dark text-break" style="font-size: 0.8rem;">
+                            ${statusIcon}${escapeHtml(file.filename)}
+                        </span>
+                        <span style="font-size: 0.72rem;">
+                            <span class="badge bg-success-subtle text-success border border-success-subtle">+${file.additions}</span>
+                            <span class="badge bg-danger-subtle text-danger border border-danger-subtle ms-1">-${file.deletions}</span>
+                        </span>
+                    </div>
+                    <div class="card-body p-0 overflow-auto">
+                        <table class="diff-table">
+                            <tbody>${tableRows || '<tr><td colspan="4" class="p-3 text-muted text-center">Binary or empty file change</td></tr>'}</tbody>
+                        </table>
+                    </div>
+                </div>
+            `;
+        });
+
+        treeContainer.innerHTML = treeHtml;
+        diffContainer.innerHTML = diffHtml;
+
+        document.getElementById('fileTreeSearch').oninput = function(e) {
+            const q = e.target.value.toLowerCase().trim();
+            document.querySelectorAll('.file-tree-item').forEach(item => {
+                const txt = item.innerText.toLowerCase();
+                item.style.display = txt.includes(q) ? '' : 'none';
+            });
+        };
+    }
+
+    function scrollToFile(fileId, itemEl) {
+        document.querySelectorAll('.file-tree-item').forEach(i => i.classList.remove('active'));
+        itemEl.classList.add('active');
+        const target = document.getElementById(fileId);
+        if (target) {
+            target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+    }
+
+    function parsePatchLines(patch) {
+        if (!patch) return [];
+        const lines = [];
+        let old_ln = 0;
+        let new_ln = 0;
+
+        patch.split('\n').forEach(line => {
+            if (line.startsWith('@@')) {
+                const match = line.match(/@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+                if (match) {
+                    old_ln = parseInt(match[1]);
+                    new_ln = parseInt(match[2]);
+                }
+                lines.push({ type: 'chunk', content: line, old_ln: '', new_ln: '' });
+            } else if (line.startsWith('+')) {
+                lines.push({ type: 'add', content: line.substring(1), old_ln: '', new_ln: new_ln });
+                new_ln++;
+            } else if (line.startsWith('-')) {
+                lines.push({ type: 'del', content: line.substring(1), old_ln: old_ln, new_ln: '' });
+                old_ln++;
+            } else {
+                const content = line.startsWith(' ') ? line.substring(1) : line;
+                lines.push({ type: 'ctx', content: content, old_ln: old_ln, new_ln: new_ln });
+                old_ln++;
+                new_ln++;
+            }
+        });
+
+        return lines;
+    }
+
+    async function executeRemoval() {
+        const selected = Array.from(document.querySelectorAll('.commit-checkbox:checked')).map(cb => cb.value);
+        const strategy = document.querySelector('input[name="strategy"]:checked').value;
+        const commitMessage = document.getElementById('customMsg').value;
+        const execBtn = document.getElementById('executeBtn');
+
+        execBtn.disabled = true;
+        execBtn.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span>Applying live changes...`;
+
+        try {
+            const response = await fetch(`/repo/${owner}/${repo}/delete-commits`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    branch: currentBranch,
+                    commit_shas: selected,
+                    strategy: strategy,
+                    commit_message: commitMessage
+                })
+            });
+
+            const result = await response.json();
+            if (result.success) {
+                document.getElementById('removalFormSection').classList.add('d-none');
+                document.getElementById('resultContainer').classList.remove('d-none');
+                document.getElementById('syncCommands').textContent = result.local_sync_instructions.join('\n');
+                execBtn.classList.add('d-none');
+                document.getElementById('modalCloseBtn').textContent = 'Done';
+
+                document.querySelectorAll('.commit-checkbox').forEach(cb => cb.checked = false);
+                document.getElementById('selectedCount').textContent = 0;
+                document.getElementById('deleteBtn').disabled = true;
+                await fetchLiveCommits();
+            } else {
+                alert("Error: " + result.error);
+                execBtn.disabled = false;
+                execBtn.innerHTML = 'Confirm & Update GitHub';
+            }
+        } catch (err) {
+            alert("Network error while updating.");
+            execBtn.disabled = false;
+            execBtn.innerHTML = 'Confirm & Update GitHub';
+        }
+    }
+
+    function setRestoreSha(sha) {
+        document.getElementById('targetRestoreSha').value = sha;
+    }
+
+    function quickRestore(sha) {
+        setRestoreSha(sha);
+        const modal = bootstrap.Modal.getOrCreateInstance(document.getElementById('restoreModal'));
+        modal.show();
+    }
+
+    async function executeRestore() {
+        const sha = document.getElementById('targetRestoreSha').value.trim();
+        const rBtn = document.getElementById('restoreBtn');
+
+        if (!sha) {
+            alert("Please enter a commit SHA to restore.");
+            return;
+        }
+
+        rBtn.disabled = true;
+        rBtn.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span>Restoring live...`;
+
+        try {
+            const response = await fetch(`/repo/${owner}/${repo}/restore`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    branch: currentBranch,
+                    target_sha: sha
+                })
+            });
+
+            const result = await response.json();
+            if (result.success) {
+                document.getElementById('restoreFormSection').classList.add('d-none');
+                document.getElementById('restoreResult').classList.remove('d-none');
+                document.getElementById('restoreSync').textContent = result.local_sync_instructions.join('\n');
+                rBtn.classList.add('d-none');
+                document.getElementById('restoreCloseBtn').textContent = 'Done';
+
+                await fetchLiveCommits();
+            } else {
+                alert("Error: " + result.error);
+                rBtn.disabled = false;
+                rBtn.innerHTML = 'Restore Branch Now';
+            }
+        } catch (err) {
+            alert("Network error.");
+            rBtn.disabled = false;
+            rBtn.innerHTML = 'Restore Branch Now';
+        }
+    }
+</script>
+{% endblock %}
