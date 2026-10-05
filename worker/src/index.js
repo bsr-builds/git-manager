@@ -10,6 +10,12 @@ export default {
     origin.search = incoming.search;
 
     const headers = new Headers(request.headers);
+
+    // Do not forward the Worker hostname as Host to the Quick Tunnel.
+    // Cloudflare must set Host to the generated *.trycloudflare.com origin.
+    headers.delete("Host");
+    headers.delete("Content-Length");
+
     if (env.WORKER_SECRET) {
       headers.set("X-Worker-Secret", env.WORKER_SECRET);
     }

@@ -5,8 +5,8 @@ APP_PORT="${APP_PORT:-}"
 DOCKER_CONTAINER="${DOCKER_CONTAINER:-git-manager}"
 WORKER_NAME="${WORKER_NAME:-git-manager}"
 GATEKEEPER_PORT="${GATEKEEPER_PORT:-10000}"
-GH_CLIENT_ID="${GH_CLIENT_ID:-}"
-GH_CLIENT_SECRET="${GH_CLIENT_SECRET:-}"
+GITHUB_CLIENT_ID="${GITHUB_CLIENT_ID:-}"
+GITHUB_CLIENT_SECRET="${GITHUB_CLIENT_SECRET:-}"
 FLASK_SECRET_KEY="${FLASK_SECRET_KEY:-}"
 CLOUDFLARE_API_TOKEN="${CLOUDFLARE_API_TOKEN:-}"
 
@@ -24,7 +24,7 @@ if [[ -z "$CLOUDFLARE_API_TOKEN" ]]; then
   exit 1
 fi
 
-if [[ -z "$GH_CLIENT_ID" || -z "$GH_CLIENT_SECRET" || -z "$FLASK_SECRET_KEY" ]]; then
+if [[ -z "$GITHUB_CLIENT_ID" || -z "$GITHUB_CLIENT_SECRET" || -z "$FLASK_SECRET_KEY" ]]; then
   echo "ERROR: GitHub OAuth secrets and FLASK_SECRET_KEY are required."
   exit 1
 fi
@@ -57,8 +57,8 @@ sudo docker run -d \
   -e PORT=5000 \
   -e EXTERNAL_BASE_URL="" \
   -e FLASK_SECRET_KEY="$FLASK_SECRET_KEY" \
-  -e GITHUB_CLIENT_ID="$GH_CLIENT_ID" \
-  -e GITHUB_CLIENT_SECRET="$GH_CLIENT_SECRET" \
+  -e GITHUB_CLIENT_ID="$GITHUB_CLIENT_ID" \
+  -e GITHUB_CLIENT_SECRET="$GITHUB_CLIENT_SECRET" \
   "${DOCKER_CONTAINER}:latest"
 
 sleep 4
@@ -67,14 +67,15 @@ sudo docker ps --format '{{.Names}}' | grep -Fxq "$DOCKER_CONTAINER" || {
   exit 1
 }
 
-# Gatekeeper is also localhost-only. The public quick tunnel cannot reach the app
-# without the secret header injected by the Worker.
+# Gatekeeper is also localhost-only. Run Nginx in host networking so it can
+# reliably proxy to the localhost-only Docker app on Linux. The public quick
+# tunnel cannot reach the app without the secret header injected by the Worker.
 WORKER_SECRET="$(openssl rand -hex 32)"
 mkdir -p "$HOME/gatekeeper"
 chmod 700 "$HOME/gatekeeper"
 cat > "$HOME/gatekeeper/default.conf" <<NGINX
 server {
-    listen 80;
+    listen ${GATEKEEPER_PORT};
     server_name _;
 
     location / {
@@ -82,7 +83,7 @@ server {
             return 403;
         }
 
-        proxy_pass http://host.docker.internal:${APP_PORT};
+        proxy_pass http://127.0.0.1:${APP_PORT};
         proxy_http_version 1.1;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
@@ -96,16 +97,19 @@ server {
 }
 NGINX
 
+sudo docker rm -f gatekeeper-git-manager >/dev/null 2>&1 || true
 sudo docker run -d \
   --name gatekeeper-git-manager \
   --restart unless-stopped \
-  --add-host=host.docker.internal:host-gateway \
-  -p "127.0.0.1:${GATEKEEPER_PORT}:80" \
+  --network host \
   -v "$HOME/gatekeeper/default.conf:/etc/nginx/conf.d/default.conf:ro" \
   nginx:alpine
 
 sleep 2
-sudo docker ps --format '{{.Names}}' | grep -Fxq gatekeeper-git-manager || exit 1
+sudo docker ps --format '{{.Names}}' | grep -Fxq gatekeeper-git-manager || {
+  sudo docker logs gatekeeper-git-manager 2>&1 | tail -n 100 || true
+  exit 1
+}
 
 # Install cloudflared only if it is missing.
 if ! command -v cloudflared >/dev/null 2>&1; then
@@ -124,7 +128,7 @@ fi
 
 # Start an ephemeral Cloudflare Quick Tunnel. Its URL is intentionally not
 # exposed to the app; the Worker becomes the only usable public entry point.
-nohup cloudflared tunnel --no-autoupdate --url "http://127.0.0.1:${GATEKEEPER_PORT}" >"$TUNNEL_LOG" 2>&1 &
+setsid cloudflared tunnel --no-autoupdate --url "http://127.0.0.1:${GATEKEEPER_PORT}" >"$TUNNEL_LOG" 2>&1 < /dev/null &
 echo $! > "$TUNNEL_PID"
 
 TUNNEL_URL=""
@@ -143,9 +147,8 @@ fi
 echo "Cloudflare Tunnel: $TUNNEL_URL"
 
 # Deploy the Worker using only the Worker name variable.
-# The repository already contains worker/src/index.js, so do not copy it
-# onto itself (cp would fail with "are the same file").
 mkdir -p "$WORKER_DIR/src"
+cp worker/src/index.js "$WORKER_DIR/src/index.js"
 cat > "$WORKER_DIR/wrangler.toml" <<WRANGLER
 name = "${WORKER_NAME}"
 main = "src/index.js"
@@ -179,8 +182,8 @@ sudo docker run -d \
   -e PORT=5000 \
   -e EXTERNAL_BASE_URL="$WORKER_URL" \
   -e FLASK_SECRET_KEY="$FLASK_SECRET_KEY" \
-  -e GITHUB_CLIENT_ID="$GH_CLIENT_ID" \
-  -e GITHUB_CLIENT_SECRET="$GH_CLIENT_SECRET" \
+  -e GITHUB_CLIENT_ID="$GITHUB_CLIENT_ID" \
+  -e GITHUB_CLIENT_SECRET="$GITHUB_CLIENT_SECRET" \
   "${DOCKER_CONTAINER}:latest"
 
 sleep 3
