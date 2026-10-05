@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 import requests
 from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify
 from dotenv import load_dotenv
+from urllib.parse import quote
 
 load_dotenv()
 
@@ -15,9 +16,24 @@ app.secret_key = os.getenv("FLASK_SECRET_KEY", "dev-secret-key-change-in-product
 
 GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID")
 GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET")
+EXTERNAL_BASE_URL = os.getenv("EXTERNAL_BASE_URL", "").rstrip("/")
 GITHUB_AUTH_URL = "https://github.com/login/oauth/authorize"
 GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
 GITHUB_API_URL = "https://api.github.com"
+
+# Public URL exposed through the Cloudflare Worker.
+# Set CLOUDFLARE_WORKER_URL in GitHub Actions Variables, for example:
+# https://git-manager.example.workers.dev
+CLOUDFLARE_WORKER_URL = os.getenv("CLOUDFLARE_WORKER_URL", "").strip().rstrip("/")
+
+
+def get_external_url(path="/"):
+    """Build an externally reachable URL using the configured Cloudflare Worker URL."""
+    if not CLOUDFLARE_WORKER_URL:
+        return url_for("index", _external=True)
+    if not path.startswith("/"):
+        path = "/" + path
+    return f"{CLOUDFLARE_WORKER_URL}{path}"
 
 # In-memory fast cache for concluded CI statuses (SHA -> dict)
 CI_CACHE = {}
@@ -120,6 +136,21 @@ def compute_accurate_ci_status(owner, repo, sha, headers):
     return ci_status
 
 
+
+def get_external_base_url():
+    """Return the public base URL used for GitHub OAuth callbacks."""
+    if EXTERNAL_BASE_URL:
+        return EXTERNAL_BASE_URL.rstrip("/")
+
+    # Respect reverse-proxy headers when no explicit public URL is configured.
+    proto = request.headers.get("X-Forwarded-Proto", request.scheme).split(",")[0].strip()
+    host = request.headers.get("X-Forwarded-Host", request.host).split(",")[0].strip()
+    return f"{proto}://{host}"
+
+def get_callback_url():
+    return f"{get_external_base_url()}/callback"
+
+
 @app.route("/")
 def index():
     if "access_token" in session:
@@ -188,8 +219,21 @@ def login_token():
 
 @app.route("/login")
 def login():
-    scope = "repo workflow read:user"
-    auth_redirect = f"{GITHUB_AUTH_URL}?client_id={GITHUB_CLIENT_ID}&scope={scope}"
+    if not GITHUB_CLIENT_ID or not GITHUB_CLIENT_SECRET:
+        flash("GitHub App OAuth is not configured.", "danger")
+        return redirect(url_for("index"))
+
+    callback_url = get_external_url("/callback")
+
+    # The GitHub App controls the actual permissions. The OAuth request
+    # supplies the public callback URL exposed by the Cloudflare Worker.
+    from urllib.parse import urlencode
+    params = {
+        "client_id": GITHUB_CLIENT_ID,
+        "redirect_uri": callback_url,
+    }
+
+    auth_redirect = f"{GITHUB_AUTH_URL}?{urlencode(params)}"
     return redirect(auth_redirect)
 
 
@@ -207,6 +251,7 @@ def callback():
             "client_id": GITHUB_CLIENT_ID,
             "client_secret": GITHUB_CLIENT_SECRET,
             "code": code,
+            "redirect_uri": get_external_url("/callback"),
         },
     )
     data = response.json()
@@ -923,4 +968,5 @@ def rename_commit(owner, repo):
 
 
 if __name__ == "__main__":
-    app.run(debug=True, port=5000)
+    port = int(os.getenv("PORT", "5000"))
+    app.run(host="0.0.0.0", debug=False, port=port)
