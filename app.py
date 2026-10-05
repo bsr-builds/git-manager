@@ -22,18 +22,17 @@ GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
 GITHUB_API_URL = "https://api.github.com"
 
 # Public URL exposed through the Cloudflare Worker.
-# Set CLOUDFLARE_WORKER_URL in GitHub Actions Variables, for example:
-# https://git-manager.example.workers.dev
-CLOUDFLARE_WORKER_URL = os.getenv("CLOUDFLARE_WORKER_URL", "").strip().rstrip("/")
+# The deployment workflow sets EXTERNAL_BASE_URL automatically after the
+# Worker is deployed. No server IP/port is used for OAuth callbacks.
 
 
 def get_external_url(path="/"):
-    """Build an externally reachable URL using the configured Cloudflare Worker URL."""
-    if not CLOUDFLARE_WORKER_URL:
-        return url_for("index", _external=True)
+    """Build an externally reachable URL using the Cloudflare Worker URL."""
+    base = get_external_base_url()
     if not path.startswith("/"):
         path = "/" + path
-    return f"{CLOUDFLARE_WORKER_URL}{path}"
+    return f"{base}{path}"
+
 
 # In-memory fast cache for concluded CI statuses (SHA -> dict)
 CI_CACHE = {}

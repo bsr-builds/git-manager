@@ -1,53 +1,73 @@
 # Git Manager deployment
 
-## Required GitHub Secrets
+## GitHub Actions Secrets
+
+Use these exact names:
 
 - `SERVER_HOST`
 - `SERVER_USER`
 - `SERVER_SSH_KEY`
-- `GITHUB_CLIENT_ID`
-- `GITHUB_CLIENT_SECRET`
+- `GH_CLIENT_ID`
+- `GH_CLIENT_SECRET`
 - `FLASK_SECRET_KEY`
+- `CLOUDFLARE_API_TOKEN`
 
-## Optional Secrets
+`GH_CLIENT_ID` and `GH_CLIENT_SECRET` are deliberately not named `GITHUB_*` because GitHub Actions reserves the `GITHUB_` prefix for its own variables.
 
-- `WORKER_SECRET` - required when the Nginx gatekeeper is enabled
-- `CLOUDFLARE_API_TOKEN` - required when Worker deployment is enabled
+## GitHub Actions Variables
 
-## GitHub Variables
+Recommended values:
 
-- `APP_PORT` - optional; empty = automatically choose a free host port starting at 8080
-- `DOCKER_CONTAINER` - optional; default `git-manager`
-- `SERVER_SSH_PORT` - optional; default `22`
-- `GATEKEEPER_ENABLED` - `false` by default
-- `GATEKEEPER_PORT` - default `10000`
-- `CLOUDFLARE_WORKER_ENABLED` - `false` by default
-- `CLOUDFLARE_WORKER_NAME` - e.g. `git-manager`
-- `CLOUDFLARE_ORIGIN_HOST` - hostname of the existing Cloudflare Named Tunnel origin, e.g. `git-manager-origin.example.com`
-- `EXTERNAL_BASE_URL` - public GitHub OAuth base URL, e.g. `https://git-manager.example.workers.dev`
+```text
+WORKER_NAME=git-manager
+APP_PORT=
+DOCKER_CONTAINER=git-manager
+SERVER_SSH_PORT=22
+GATEKEEPER_PORT=10000
+```
 
-## GitHub App
+No `CLOUDFLARE_ORIGIN_HOST` or `EXTERNAL_BASE_URL` variable is required.
 
-Set the GitHub OAuth App / GitHub App callback to:
+## How production routing works
 
-`EXTERNAL_BASE_URL + /callback`
+```text
+Worker URL
+   ↓
+Cloudflare Worker
+   ↓  (adds X-Worker-Secret)
+Cloudflare Quick Tunnel
+   ↓
+localhost-only Nginx gatekeeper
+   ↓
+localhost-only Docker port
+   ↓
+Flask :5000
+```
 
-Example:
+The deployment script automatically:
 
-`https://git-manager.example.workers.dev/callback`
+1. Chooses a local host port if `APP_PORT` is blank.
+2. Binds Docker to `127.0.0.1`, not the server's public interface.
+3. Runs a localhost-only Nginx gatekeeper.
+4. Starts a Cloudflare Quick Tunnel to the gatekeeper.
+5. Detects the generated `trycloudflare.com` URL automatically.
+6. Deploys the Worker using `WORKER_NAME`.
+7. Stores the generated tunnel URL and gatekeeper secret as Worker secrets.
+8. Detects the real `workers.dev` URL automatically.
+9. Restarts Git Manager with that Worker URL as `EXTERNAL_BASE_URL`.
 
-Do not use `127.0.0.1` in production.
+Therefore the server's `IP:PORT` is not the public application URL. Direct requests to the tunnel without the Worker secret receive `403`.
 
-## Cloudflare Worker
+## GitHub App callback
 
-The Worker name comes from the GitHub Actions variable:
+After the first deployment, the workflow prints the exact Worker URL. Configure the GitHub App:
 
-`CLOUDFLARE_WORKER_NAME`
+```text
+Homepage URL:
+https://<worker-url>
 
-The workflow deploys that exact name with Wrangler.
+Callback URL:
+https://<worker-url>/callback
+```
 
-Quick Tunnel / `trycloudflare.com` is not used.
-
-The Worker forwards requests to `CLOUDFLARE_ORIGIN_HOST`, which should be the hostname already exposed by the permanent Cloudflare Named Tunnel.
-
-The Worker URL is not guessed from the name because a `workers.dev` URL also depends on the Cloudflare account's workers.dev subdomain. Use `EXTERNAL_BASE_URL` for the exact public URL used by GitHub OAuth.
+Do not use the server IP, Docker port, or `trycloudflare.com` URL as the GitHub callback.

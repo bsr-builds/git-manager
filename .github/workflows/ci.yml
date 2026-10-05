@@ -12,43 +12,32 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Deploy to Ubuntu server
         uses: appleboy/ssh-action@v1.2.2
         env:
+          WORKER_NAME: ${{ vars.WORKER_NAME }}
           APP_PORT: ${{ vars.APP_PORT }}
-          DOCKER_CONTAINER: ${{ vars.DOCKER_CONTAINER }}
-          GATEKEEPER_ENABLED: ${{ vars.GATEKEEPER_ENABLED }}
           GATEKEEPER_PORT: ${{ vars.GATEKEEPER_PORT }}
-          EXTERNAL_BASE_URL: ${{ vars.EXTERNAL_BASE_URL }}
-          CLOUDFLARE_WORKER_NAME: ${{ vars.CLOUDFLARE_WORKER_NAME }}
-          CLOUDFLARE_ORIGIN_HOST: ${{ vars.CLOUDFLARE_ORIGIN_HOST }}
-          CLOUDFLARE_WORKER_ENABLED: ${{ vars.CLOUDFLARE_WORKER_ENABLED }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          GITHUB_CLIENT_ID: ${{ secrets.GITHUB_CLIENT_ID }}
-          GITHUB_CLIENT_SECRET: ${{ secrets.GITHUB_CLIENT_SECRET }}
+          DOCKER_CONTAINER: ${{ vars.DOCKER_CONTAINER }}
+          GITHUB_CLIENT_ID: ${{ secrets.GH_CLIENT_ID }}
+          GITHUB_CLIENT_SECRET: ${{ secrets.GH_CLIENT_SECRET }}
           FLASK_SECRET_KEY: ${{ secrets.FLASK_SECRET_KEY }}
-          WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           port: ${{ vars.SERVER_SSH_PORT || '22' }}
-          envs: APP_PORT,DOCKER_CONTAINER,GATEKEEPER_ENABLED,GATEKEEPER_PORT,EXTERNAL_BASE_URL,CLOUDFLARE_WORKER_NAME,CLOUDFLARE_ORIGIN_HOST,CLOUDFLARE_WORKER_ENABLED,CLOUDFLARE_API_TOKEN,GITHUB_CLIENT_ID,GITHUB_CLIENT_SECRET,FLASK_SECRET_KEY,WORKER_SECRET
+          envs: WORKER_NAME,APP_PORT,GATEKEEPER_PORT,DOCKER_CONTAINER,GITHUB_CLIENT_ID,GITHUB_CLIENT_SECRET,FLASK_SECRET_KEY,CLOUDFLARE_API_TOKEN
           script_stop: true
           script: |
             set -e
 
             SERVER_PATH="${HOME}/git-manager"
-            DOCKER_CONTAINER="${DOCKER_CONTAINER:-git-manager}"
-            APP_PORT="${APP_PORT:-}"
-            GATEKEEPER_ENABLED="${GATEKEEPER_ENABLED:-false}"
-            GATEKEEPER_PORT="${GATEKEEPER_PORT:-10000}"
-            CLOUDFLARE_WORKER_ENABLED="${CLOUDFLARE_WORKER_ENABLED:-false}"
-            CLOUDFLARE_WORKER_NAME="${CLOUDFLARE_WORKER_NAME:-git-manager}"
-            CLOUDFLARE_ORIGIN_HOST="${CLOUDFLARE_ORIGIN_HOST:-}"
-
             mkdir -p "$SERVER_PATH"
             cd "$SERVER_PATH"
 
@@ -63,178 +52,12 @@ jobs:
             git reset --hard origin/master
             git clean -fd
 
-            if [ -z "$APP_PORT" ]; then
-              APP_PORT=8080
-              while ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq ":${APP_PORT}$"; do
-                APP_PORT=$((APP_PORT + 1))
-              done
-            elif ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq ":${APP_PORT}$"; then
-              echo "ERROR: APP_PORT=$APP_PORT is already in use."
-              exit 1
-            fi
-
-            # The GitHub App callback is the Cloudflare Worker URL.
-            # This is built from the configured Worker name only when a
-            # complete public URL is supplied. Otherwise the reverse proxy
-            # URL is used.
-            PUBLIC_BASE_URL="${EXTERNAL_BASE_URL:-}"
-            if [ -z "$PUBLIC_BASE_URL" ] && [ "$CLOUDFLARE_WORKER_ENABLED" = "true" ] && [ -n "$CLOUDFLARE_ORIGIN_HOST" ]; then
-              echo "No EXTERNAL_BASE_URL supplied; set it to the public Worker hostname."
-            fi
-
-            sudo docker build --pull -t "${DOCKER_CONTAINER}:latest" .
-
-            sudo docker rm -f "$DOCKER_CONTAINER" 2>/dev/null || true
-
-            sudo docker run -d \
-              --name "$DOCKER_CONTAINER" \
-              --restart unless-stopped \
-              -p "${APP_PORT}:5000" \
-              -e PORT=5000 \
-              -e EXTERNAL_BASE_URL="$PUBLIC_BASE_URL" \
-              -e FLASK_SECRET_KEY="$FLASK_SECRET_KEY" \
-              -e GITHUB_CLIENT_ID="$GITHUB_CLIENT_ID" \
-              -e GITHUB_CLIENT_SECRET="$GITHUB_CLIENT_SECRET" \
-              "${DOCKER_CONTAINER}:latest"
-
-            sleep 5
-
-            if ! sudo docker ps --format '{{.Names}}' | grep -Fxq "$DOCKER_CONTAINER"; then
-              sudo docker logs "$DOCKER_CONTAINER" 2>&1 | tail -n 100 || true
-              exit 1
-            fi
-
-            # Optional gatekeeper.
-            sudo docker rm -f gatekeeper-git-manager 2>/dev/null || true
-
-            if [ "$GATEKEEPER_ENABLED" = "true" ]; then
-              if [ -z "${WORKER_SECRET:-}" ]; then
-                echo "ERROR: WORKER_SECRET is required when gatekeeper is enabled."
-                exit 1
-              fi
-
-              if ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq ":${GATEKEEPER_PORT}$"; then
-                echo "ERROR: GATEKEEPER_PORT=$GATEKEEPER_PORT is already in use."
-                exit 1
-              fi
-
-              mkdir -p "$HOME/gatekeeper"
-              chmod 700 "$HOME/gatekeeper"
-
-              cat > "$HOME/gatekeeper/default.conf" <<NGINX
-            server {
-                listen 80;
-                server_name _;
-
-                location / {
-                    if (\$http_x_worker_secret != "${WORKER_SECRET}") {
-                        return 403;
-                    }
-
-                    proxy_pass http://host.docker.internal:${APP_PORT};
-                    proxy_http_version 1.1;
-                    proxy_set_header Host \$host;
-                    proxy_set_header X-Real-IP \$remote_addr;
-                    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-                    proxy_set_header X-Forwarded-Proto https;
-                    proxy_set_header Upgrade \$http_upgrade;
-                    proxy_set_header Connection "upgrade";
-                    proxy_read_timeout 3600;
-                    proxy_send_timeout 3600;
-                }
-            }
-            NGINX
-
-              sudo docker run -d \
-                --name gatekeeper-git-manager \
-                --restart unless-stopped \
-                --add-host=host.docker.internal:host-gateway \
-                -p "${GATEKEEPER_PORT}:80" \
-                -v "$HOME/gatekeeper/default.conf:/etc/nginx/conf.d/default.conf:ro" \
-                nginx:alpine
-
-              sleep 3
-              sudo docker ps --format '{{.Names}}' | grep -Fxq 'gatekeeper-git-manager'
-            fi
-
-            # Deploy/update the Cloudflare Worker using the variable name.
-            # No Quick Tunnel and no trycloudflare.com URL parsing.
-            if [ "$CLOUDFLARE_WORKER_ENABLED" = "true" ]; then
-              if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
-                echo "ERROR: CLOUDFLARE_API_TOKEN is required."
-                exit 1
-              fi
-              if [ -z "$CLOUDFLARE_WORKER_NAME" ]; then
-                echo "ERROR: CLOUDFLARE_WORKER_NAME is empty."
-                exit 1
-              fi
-              if [ -z "$CLOUDFLARE_ORIGIN_HOST" ]; then
-                echo "ERROR: CLOUDFLARE_ORIGIN_HOST is required."
-                exit 1
-              fi
-
-              mkdir -p "$SERVER_PATH/worker/src"
-              cat > "$SERVER_PATH/worker/src/index.js" <<'WORKER'
-            export default {
-              async fetch(request, env) {
-                const url = new URL(request.url);
-
-                if (!env.CLOUDFLARE_ORIGIN_HOST) {
-                  return new Response("Origin is not configured.", { status: 500 });
-                }
-
-                url.hostname = env.CLOUDFLARE_ORIGIN_HOST;
-                url.protocol = "https:";
-
-                const headers = new Headers(request.headers);
-                if (env.WORKER_SECRET) {
-                  headers.set("X-Worker-Secret", env.WORKER_SECRET);
-                }
-
-                return fetch(new Request(url, {
-                  method: request.method,
-                  headers,
-                  body: request.method === "GET" || request.method === "HEAD" ? undefined : request.body,
-                  redirect: "follow"
-                }));
-              }
-            };
-            WORKER
-
-              cat > "$SERVER_PATH/worker/wrangler.toml" <<WRANGLER
-            name = "${CLOUDFLARE_WORKER_NAME}"
-            main = "src/index.js"
-            compatibility_date = "2026-10-01"
-            workers_dev = true
-            WRANGLER
-
-              export CLOUDFLARE_API_TOKEN
-
-              cd "$SERVER_PATH/worker"
-              npx --yes wrangler@latest deploy --name "$CLOUDFLARE_WORKER_NAME"
-
-              # Store the worker secret as a Cloudflare Worker secret.
-              if [ -n "${WORKER_SECRET:-}" ]; then
-                printf '%s' "$WORKER_SECRET" | \
-                  npx --yes wrangler@latest secret put WORKER_SECRET \
-                    --name "$CLOUDFLARE_WORKER_NAME"
-              fi
-
-              # Origin is a Worker environment variable, not a repository secret.
-              printf '%s' "$CLOUDFLARE_ORIGIN_HOST" | \
-                npx --yes wrangler@latest secret put CLOUDFLARE_ORIGIN_HOST \
-                  --name "$CLOUDFLARE_WORKER_NAME"
-
-              echo "Cloudflare Worker deployed: $CLOUDFLARE_WORKER_NAME"
-            fi
-
-            echo ""
-            echo "=========================================="
-            echo "DEPLOYMENT SUCCESSFUL"
-            echo "=========================================="
-            echo "Path       : $SERVER_PATH"
-            echo "Container  : $DOCKER_CONTAINER"
-            echo "App port   : $APP_PORT"
-            echo "Gatekeeper : $GATEKEEPER_ENABLED"
-            echo "Worker     : $CLOUDFLARE_WORKER_NAME"
-            echo "=========================================="
+            WORKER_NAME="${WORKER_NAME:-git-manager}" \
+            APP_PORT="${APP_PORT:-}" \
+            GATEKEEPER_PORT="${GATEKEEPER_PORT:-10000}" \
+            DOCKER_CONTAINER="${DOCKER_CONTAINER:-git-manager}" \
+            GITHUB_CLIENT_ID="$GITHUB_CLIENT_ID" \
+            GITHUB_CLIENT_SECRET="$GITHUB_CLIENT_SECRET" \
+            FLASK_SECRET_KEY="$FLASK_SECRET_KEY" \
+            CLOUDFLARE_API_TOKEN="$CLOUDFLARE_API_TOKEN" \
+            ./deploy.sh
