@@ -143,8 +143,9 @@ fi
 echo "Cloudflare Tunnel: $TUNNEL_URL"
 
 # Deploy the Worker using only the Worker name variable.
+# The repository already contains worker/src/index.js, so do not copy it
+# onto itself (cp would fail with "are the same file").
 mkdir -p "$WORKER_DIR/src"
-cp worker/src/index.js "$WORKER_DIR/src/index.js"
 cat > "$WORKER_DIR/wrangler.toml" <<WRANGLER
 name = "${WORKER_NAME}"
 main = "src/index.js"
