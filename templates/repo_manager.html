@@ -1,0 +1,401 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="d-flex flex-column flex-lg-row justify-content-between align-items-start align-items-lg-center gap-2 mb-3">
+  <div>
+    <nav aria-label="breadcrumb">
+      <ol class="breadcrumb mb-1" style="font-size:.8rem">
+        <li class="breadcrumb-item"><a href="{{ url_for('list_repos') }}" class="text-decoration-none">Repositories</a></li>
+        <li class="breadcrumb-item active">{{ owner }}/{{ repo }}</li>
+      </ol>
+    </nav>
+    <div class="d-flex align-items-center gap-2 flex-wrap">
+      <h4 class="mb-0 fw-bold">Repository Manager</h4>
+      {% if repo_info.private %}<span class="badge bg-secondary"><i class="bi bi-lock-fill me-1"></i>Private</span>{% else %}<span class="badge bg-light text-dark border">Public</span>{% endif %}
+    </div>
+  </div>
+  <div class="d-flex gap-2 flex-wrap">
+    <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('repo_commits', owner=owner, repo=repo, branch=branch) }}"><i class="bi bi-clock-history me-1"></i>Commits</a>
+    <a class="btn btn-outline-success btn-sm" href="{{ url_for('download_repo', owner=owner, repo=repo, branch=branch) }}"><i class="bi bi-download me-1"></i>Download Repo</a>
+  </div>
+</div>
+
+<div class="row g-3">
+  <div class="col-12 col-xl-8">
+    <div class="card shadow-sm border">
+      <div class="card-header bg-white d-flex flex-column flex-sm-row justify-content-between gap-2 py-2">
+        <div class="d-flex align-items-center gap-2">
+          <strong><i class="bi bi-folder2-open me-1"></i>Files</strong>
+          <span class="badge bg-light text-dark border">{{ entries|length }}</span>
+        </div>
+        <div class="d-flex gap-2">
+          <select id="branchSelect" class="form-select form-select-sm" style="min-width:130px" onchange="switchBranch(this.value)">
+            {% for b in branches %}<option value="{{ b.name }}" {% if b.name == branch %}selected{% endif %}>{{ b.name }}</option>{% endfor %}
+          </select>
+          <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#uploadModal"><i class="bi bi-upload me-1"></i>Upload</button>
+          <button class="btn btn-outline-primary btn-sm" data-bs-toggle="modal" data-bs-target="#newFileModal"><i class="bi bi-file-earmark-plus me-1"></i>New File</button>
+          <button class="btn btn-outline-primary btn-sm" data-bs-toggle="modal" data-bs-target="#folderModal"><i class="bi bi-folder-plus me-1"></i>Folder</button>
+        </div>
+      </div>
+      <div class="p-2 border-bottom">
+        <input id="fileSearch" class="form-control form-control-sm" placeholder="Search files and folders...">
+      </div>
+      <div class="list-group list-group-flush" id="fileList">
+        {% if entries %}
+          <div id="repoTree" class="repo-tree p-2"></div>
+        {% else %}
+          <div class="p-4 text-center text-muted small">This branch has no files yet.</div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <div class="col-12 col-xl-4">
+    <div class="card shadow-sm border mb-3">
+      <div class="card-header bg-white fw-semibold py-2"><i class="bi bi-pencil-square me-1"></i>Repository Description</div>
+      <div class="card-body">
+        <textarea id="description" class="form-control form-control-sm" rows="4" maxlength="350" placeholder="Repository description...">{{ repo_info.description or '' }}</textarea>
+        <div class="d-flex justify-content-between align-items-center mt-2">
+          <small class="text-muted">Up to 350 characters.</small>
+          <button class="btn btn-primary btn-sm" onclick="saveDescription()">Save Description</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card shadow-sm border mb-3">
+      <div class="card-header bg-white fw-semibold py-2"><i class="bi bi-person-badge me-1"></i>Commit Author</div>
+      <div class="card-body">
+        <div class="small text-muted mb-2">Used for new file, upload, folder and delete-file commits.</div>
+        <div class="small fw-semibold mb-2">Author</div>
+        <div class="border rounded p-2 mb-2 bg-light-subtle">
+          <div class="form-check mb-2">
+            <input class="form-check-input" type="radio" name="authorMode" id="authorModeAccount" value="account" checked onchange="toggleAuthor()">
+            <label class="form-check-label" for="authorModeAccount">
+              Use current GitHub account — <strong>{{ session.get('user', {}).get('login', owner) }}</strong>
+            </label>
+          </div>
+          <div class="form-check">
+            <input class="form-check-input" type="radio" name="authorMode" id="authorModeManual" value="manual" onchange="toggleAuthor()">
+            <label class="form-check-label" for="authorModeManual">Enter author manually</label>
+          </div>
+        </div>
+        <div id="manualAuthorFields" class="d-none">
+          <input id="authorName" class="form-control form-control-sm mb-2" value="{{ author_default_name }}" placeholder="Author name" autocomplete="name">
+          <input id="authorEmail" type="email" class="form-control form-control-sm" value="{{ author_default_email }}" placeholder="Author email" autocomplete="email">
+        </div>
+        <div class="alert alert-light border py-2 mt-2 mb-0" style="font-size:.74rem">Current account: <strong>{{ session.get('user', {}).get('login', owner) }}</strong></div>
+      </div>
+    </div>
+
+    <div class="card shadow-sm border border-danger">
+      <div class="card-header bg-white text-danger fw-semibold py-2"><i class="bi bi-exclamation-triangle me-1"></i>Danger Zone</div>
+      <div class="card-body">
+        <p class="small text-muted mb-2">Permanently deletes this GitHub repository, including its issues, pull requests and history.</p>
+        <button class="btn btn-outline-danger btn-sm w-100" data-bs-toggle="modal" data-bs-target="#deleteRepoModal"><i class="bi bi-trash3 me-1"></i>Delete Repository</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Upload -->
+<div class="modal fade" id="uploadModal" tabindex="-1"><div class="modal-dialog modal-dialog-centered"><div class="modal-content">
+  <div class="modal-header py-2"><h6 class="modal-title fw-bold">Upload New File</h6><button class="btn-close" data-bs-dismiss="modal"></button></div>
+  <div class="modal-body">
+    <label class="form-label small fw-semibold">File</label><input id="uploadFile" type="file" class="form-control form-control-sm" onchange="fillUploadPath()">
+    <label class="form-label small fw-semibold mt-2">Repository path</label><input id="uploadPath" class="form-control form-control-sm" placeholder="folder/file.ext">
+    <label class="form-label small fw-semibold mt-2">Commit message</label><input id="uploadMessage" class="form-control form-control-sm" value="Add file">
+    <div class="small text-muted mt-2">Use the Edit button in the repository tree to modify an existing text file.</div>
+  </div>
+  <div class="modal-footer py-2"><button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary btn-sm" onclick="uploadFile()">Upload File</button></div>
+</div></div></div>
+
+<!-- New file -->
+<div class="modal fade" id="newFileModal" tabindex="-1"><div class="modal-dialog modal-lg modal-dialog-centered"><div class="modal-content">
+  <div class="modal-header py-2"><h6 class="modal-title fw-bold">Create New File</h6><button class="btn-close" data-bs-dismiss="modal"></button></div>
+  <div class="modal-body">
+    <label class="form-label small fw-semibold">File path</label><input id="newFilePath" class="form-control form-control-sm" placeholder="src/example.txt">
+    <label class="form-label small fw-semibold mt-2">File content</label><textarea id="newFileContent" class="form-control form-control-sm font-monospace" rows="10" placeholder="Enter file content..."></textarea>
+    <label class="form-label small fw-semibold mt-2">Commit message</label><input id="newFileMessage" class="form-control form-control-sm" value="Create new file">
+  </div>
+  <div class="modal-footer py-2"><button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary btn-sm" onclick="createFile()">Create File</button></div>
+</div></div></div>
+
+<!-- Folder -->
+<div class="modal fade" id="folderModal" tabindex="-1"><div class="modal-dialog modal-dialog-centered"><div class="modal-content">
+  <div class="modal-header py-2"><h6 class="modal-title fw-bold">Create New Folder</h6><button class="btn-close" data-bs-dismiss="modal"></button></div>
+  <div class="modal-body">
+    <label class="form-label small fw-semibold">Folder path</label><input id="folderPath" class="form-control form-control-sm" placeholder="assets/images">
+    <label class="form-label small fw-semibold mt-2">Commit message</label><input id="folderMessage" class="form-control form-control-sm" value="Create folder">
+    <div class="alert alert-info py-2 mt-2 mb-0 small">GitHub does not store empty folders, so this creates <code>.gitkeep</code> inside the folder.</div>
+  </div>
+  <div class="modal-footer py-2"><button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary btn-sm" onclick="createFolder()">Create Folder</button></div>
+</div></div></div>
+
+<!-- Edit file -->
+<div class="modal fade" id="editFileModal" tabindex="-1"><div class="modal-dialog modal-xl modal-dialog-centered"><div class="modal-content">
+  <div class="modal-header py-2"><div><h6 class="modal-title fw-bold mb-0">Edit File</h6><small id="editFilePath" class="text-muted font-monospace"></small></div><button class="btn-close" data-bs-dismiss="modal"></button></div>
+  <div class="modal-body">
+    <input id="editFileSha" type="hidden">
+    <textarea id="editFileContent" class="form-control form-control-sm font-monospace" rows="22" spellcheck="false" placeholder="Loading file..."></textarea>
+    <label class="form-label small fw-semibold mt-2">Commit message</label>
+    <input id="editFileMessage" class="form-control form-control-sm" value="Update file">
+    <div class="small text-muted mt-2">Changes are committed directly to the selected branch using the selected Commit Author.</div>
+  </div>
+  <div class="modal-footer py-2"><button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button><button id="saveEditFileBtn" class="btn btn-primary btn-sm" onclick="saveEditedFile()">Save Changes</button></div>
+</div></div></div>
+
+<!-- Delete file -->
+<div class="modal fade" id="deleteFileModal" tabindex="-1"><div class="modal-dialog modal-dialog-centered"><div class="modal-content">
+  <div class="modal-header bg-danger text-white py-2"><h6 class="modal-title fw-bold">Delete File</h6><button class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div>
+  <div class="modal-body"><p class="small mb-2">This will create a commit deleting:</p><code id="deleteFileName" class="small text-break"></code><input id="deleteFileSha" type="hidden"><label class="form-label small fw-semibold mt-3">Commit message</label><input id="deleteFileMessage" class="form-control form-control-sm" value="Delete file"></div>
+  <div class="modal-footer py-2"><button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button><button class="btn btn-danger btn-sm" onclick="deleteFile()">Delete File</button></div>
+</div></div></div>
+
+<!-- Delete repo -->
+<div class="modal fade" id="deleteRepoModal" tabindex="-1"><div class="modal-dialog modal-dialog-centered"><div class="modal-content">
+  <div class="modal-header bg-danger text-white py-2"><h6 class="modal-title fw-bold">Delete Repository Permanently</h6><button class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div>
+  <div class="modal-body">
+    <div class="alert alert-danger small"><strong>Warning:</strong> This action cannot be undone.</div>
+    <p class="small">Type <code>{{ owner }}/{{ repo }}</code> exactly to confirm.</p>
+    <input id="deleteRepoConfirm" class="form-control form-control-sm font-monospace" placeholder="{{ owner }}/{{ repo }}">
+  </div>
+  <div class="modal-footer py-2"><button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button><button class="btn btn-danger btn-sm" onclick="deleteRepository()">Delete Permanently</button></div>
+</div></div></div>
+{% endblock %}
+
+<style>
+  .repo-tree { font-size: .86rem; }
+  .tree-row { min-height: 34px; border-radius: 6px; }
+  .tree-row:hover { background: var(--bs-tertiary-bg, #f8f9fa); }
+  .tree-toggle { width: 24px; border: 0; background: transparent; padding: 0; color: #6c757d; }
+  .tree-name { min-width: 0; }
+  .tree-children { margin-left: 18px; border-left: 1px solid #e9ecef; padding-left: 8px; }
+  .tree-file-actions { opacity: .25; transition: opacity .15s; }
+  .tree-row:hover .tree-file-actions { opacity: 1; }
+  .tree-folder-icon { color: #f0ad00; }
+  .tree-file-icon { color: #6c757d; }
+</style>
+
+{% block scripts %}
+<script>
+const owner = {{ owner|tojson }};
+const repo = {{ repo|tojson }};
+const branch = {{ branch|tojson }};
+
+function authorPayload() {
+  const mode = document.querySelector('input[name=authorMode]:checked')?.value || 'account';
+  return {
+    author_mode: mode,
+    author_name: document.getElementById('authorName').value.trim(),
+    author_email: document.getElementById('authorEmail').value.trim()
+  };
+}
+function toggleAuthor() {
+  const manual = document.querySelector('input[name=authorMode]:checked')?.value === 'manual';
+  const fields = document.getElementById('manualAuthorFields');
+  const name = document.getElementById('authorName');
+  const email = document.getElementById('authorEmail');
+  fields.classList.toggle('d-none', !manual);
+  name.disabled = !manual;
+  email.disabled = !manual;
+}
+document.addEventListener('DOMContentLoaded', toggleAuthor);
+function jsonFetch(url, options={}) { return fetch(url, options).then(async r => { const d = await r.json().catch(() => ({error:'Invalid server response'})); if (!r.ok || d.success === false) throw new Error(d.error || 'Request failed'); return d; }); }
+function saveDescription() {
+  jsonFetch(`/repo/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/settings`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({description:document.getElementById('description').value})})
+    .then(() => alert('Repository description updated.')).catch(e => alert(e.message));
+}
+function fillUploadPath() { const f=document.getElementById('uploadFile').files[0]; if(f && !document.getElementById('uploadPath').value) document.getElementById('uploadPath').value=f.name; }
+function uploadFile() {
+  const f=document.getElementById('uploadFile').files[0]; if(!f) return alert('Select a file first.');
+  const fd=new FormData(); fd.append('file',f); fd.append('path',document.getElementById('uploadPath').value.trim()); fd.append('branch',branch); fd.append('commit_message',document.getElementById('uploadMessage').value.trim());
+  Object.entries(authorPayload()).forEach(([k,v])=>fd.append(k,v));
+  fetch(`/repo/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/file/upload`, {method:'POST', body:fd}).then(async r=>{const d=await r.json(); if(!r.ok||!d.success) throw new Error(d.error||'Upload failed'); alert('File uploaded successfully.'); location.reload();}).catch(e=>alert(e.message));
+}
+function createFile() {
+  const data={...authorPayload(), branch, path:document.getElementById('newFilePath').value.trim(), content:document.getElementById('newFileContent').value, commit_message:document.getElementById('newFileMessage').value.trim()};
+  jsonFetch(`/repo/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/file/create`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}).then(()=>{alert('File created successfully.');location.reload();}).catch(e=>alert(e.message));
+}
+function createFolder() {
+  const data={...authorPayload(), branch, path:document.getElementById('folderPath').value.trim(), commit_message:document.getElementById('folderMessage').value.trim()};
+  jsonFetch(`/repo/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/folder/create`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}).then(()=>{alert('Folder created with .gitkeep.');location.reload();}).catch(e=>alert(e.message));
+}
+async function openEditFile(path, sha) {
+  const modalEl = document.getElementById('editFileModal');
+  const content = document.getElementById('editFileContent');
+  const saveBtn = document.getElementById('saveEditFileBtn');
+  document.getElementById('editFilePath').textContent = path;
+  document.getElementById('editFileSha').value = sha;
+  document.getElementById('editFileMessage').value = `Update ${path}`;
+  content.value = '';
+  content.disabled = true;
+  saveBtn.disabled = true;
+  const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+  modal.show();
+  try {
+    const params = new URLSearchParams({path, branch});
+    const data = await jsonFetch(`/repo/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/file/content?${params.toString()}`);
+    document.getElementById('editFileSha').value = data.sha;
+    content.value = data.content;
+    content.disabled = false;
+    saveBtn.disabled = false;
+    content.focus();
+  } catch (e) {
+    modal.hide();
+    alert(e.message);
+  }
+}
+function saveEditedFile() {
+  const path = document.getElementById('editFilePath').textContent;
+  const data = {
+    ...authorPayload(), branch, path,
+    sha: document.getElementById('editFileSha').value,
+    content: document.getElementById('editFileContent').value,
+    commit_message: document.getElementById('editFileMessage').value.trim() || `Update ${path}`
+  };
+  const btn = document.getElementById('saveEditFileBtn');
+  btn.disabled = true;
+  jsonFetch(`/repo/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/file/edit`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})
+    .then(() => { alert('File updated successfully.'); location.reload(); })
+    .catch(e => { btn.disabled = false; alert(e.message); });
+}
+
+function openDeleteFile(path, sha) { document.getElementById('deleteFileName').textContent=path; document.getElementById('deleteFileSha').value=sha; document.getElementById('deleteFileMessage').value=`Delete ${path}`; new bootstrap.Modal(document.getElementById('deleteFileModal')).show(); }
+function deleteFile() {
+  const data={...authorPayload(),branch,path:document.getElementById('deleteFileName').textContent,sha:document.getElementById('deleteFileSha').value,commit_message:document.getElementById('deleteFileMessage').value.trim()};
+  jsonFetch(`/repo/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/file/delete`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}).then(()=>{alert('File deleted successfully.');location.reload();}).catch(e=>alert(e.message));
+}
+function deleteRepository() {
+  const confirmation=document.getElementById('deleteRepoConfirm').value.trim();
+  if(confirmation !== `${owner}/${repo}`) return alert(`Type ${owner}/${repo} exactly.`);
+  jsonFetch(`/repo/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/delete`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({confirmation})}).then(d=>{window.location.href=d.redirect;}).catch(e=>alert(e.message));
+}
+function switchBranch(value) { window.location.href=`{{ url_for('manage_repo', owner=owner, repo=repo) }}?branch=${encodeURIComponent(value)}`; }
+const repoEntries = {{ entries|tojson }};
+
+function buildRepoTree(entries) {
+  const root = {folders: new Map(), files: []};
+  for (const entry of entries) {
+    const parts = entry.path.split('/').filter(Boolean);
+    let node = root;
+    parts.forEach((part, index) => {
+      const last = index === parts.length - 1;
+      if (last && entry.type === 'file') {
+        node.files.push({...entry, name: part});
+      } else {
+        if (!node.folders.has(part)) node.folders.set(part, {name: part, folders: new Map(), files: []});
+        node = node.folders.get(part);
+      }
+    });
+  }
+  return root;
+}
+
+function createTreeFolder(folder, depth) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'tree-folder';
+  wrapper.dataset.path = folder.name.toLowerCase();
+
+  const row = document.createElement('div');
+  row.className = 'tree-row d-flex align-items-center gap-1 px-1 py-1';
+
+  const toggle = document.createElement('button');
+  toggle.className = 'tree-toggle';
+  toggle.innerHTML = '<i class="bi bi-chevron-down"></i>';
+
+  const icon = document.createElement('i');
+  icon.className = 'bi bi-folder-fill tree-folder-icon';
+
+  const name = document.createElement('span');
+  name.className = 'tree-name flex-grow-1 text-break font-monospace small fw-semibold';
+  name.textContent = folder.name;
+
+  row.append(toggle, icon, name);
+
+  const children = document.createElement('div');
+  children.className = 'tree-children';
+
+  const sortedFolders = [...folder.folders.values()].sort((a,b) => a.name.localeCompare(b.name, undefined, {numeric:true, sensitivity:'base'}));
+  sortedFolders.forEach(child => children.appendChild(createTreeFolder(child, depth + 1)));
+
+  const sortedFiles = [...folder.files].sort((a,b) => a.name.localeCompare(b.name, undefined, {numeric:true, sensitivity:'base'}));
+  sortedFiles.forEach(file => children.appendChild(createTreeFile(file, depth + 1)));
+
+  toggle.onclick = () => {
+    const hidden = children.classList.toggle('d-none');
+    toggle.innerHTML = hidden ? '<i class="bi bi-chevron-right"></i>' : '<i class="bi bi-chevron-down"></i>';
+    icon.className = hidden ? 'bi bi-folder tree-folder-icon' : 'bi bi-folder-fill tree-folder-icon';
+  };
+
+  wrapper.append(row, children);
+  return wrapper;
+}
+
+function createTreeFile(file, depth) {
+  const row = document.createElement('div');
+  row.className = 'tree-row d-flex align-items-center gap-2 px-1 py-1 tree-file';
+  row.dataset.path = file.path.toLowerCase();
+
+  const spacer = document.createElement('span');
+  spacer.style.width = '24px';
+  spacer.style.flex = '0 0 24px';
+
+  const icon = document.createElement('i');
+  icon.className = 'bi bi-file-earmark tree-file-icon';
+
+  const name = document.createElement('span');
+  name.className = 'tree-name flex-grow-1 text-break font-monospace small';
+  name.textContent = file.name;
+  name.title = file.path;
+
+  const size = document.createElement('span');
+  size.className = 'text-muted d-none d-md-inline';
+  size.style.fontSize = '.72rem';
+  size.textContent = `${file.size || 0} B`;
+
+  const actions = document.createElement('span');
+  actions.className = 'tree-file-actions d-flex gap-1';
+  const edit = document.createElement('button');
+  edit.className = 'btn btn-link btn-sm text-primary p-1';
+  edit.title = 'Edit file';
+  edit.innerHTML = '<i class="bi bi-pencil-square"></i>';
+  edit.onclick = () => openEditFile(file.path, file.sha);
+  const del = document.createElement('button');
+  del.className = 'btn btn-link btn-sm text-danger p-1';
+  del.title = 'Delete file';
+  del.innerHTML = '<i class="bi bi-trash3"></i>';
+  del.onclick = () => openDeleteFile(file.path, file.sha);
+  actions.append(edit, del);
+
+  row.append(spacer, icon, name, size, actions);
+  return row;
+}
+
+function renderRepoTree() {
+  const container = document.getElementById('repoTree');
+  if (!container) return;
+  container.innerHTML = '';
+  const root = buildRepoTree(repoEntries);
+  [...root.folders.values()].sort((a,b) => a.name.localeCompare(b.name, undefined, {numeric:true, sensitivity:'base'})).forEach(folder => container.appendChild(createTreeFolder(folder, 0)));
+  [...root.files].sort((a,b) => a.name.localeCompare(b.name, undefined, {numeric:true, sensitivity:'base'})).forEach(file => container.appendChild(createTreeFile(file, 0)));
+}
+
+function filterRepoTree() {
+  const q = document.getElementById('fileSearch').value.toLowerCase().trim();
+  document.querySelectorAll('#repoTree .tree-folder').forEach(folder => {
+    const matches = folder.dataset.path.includes(q);
+    const childMatches = [...folder.querySelectorAll('.tree-file, .tree-folder')].some(el => el.dataset.path.includes(q));
+    folder.style.display = (!q || matches || childMatches) ? '' : 'none';
+    if (q && childMatches) {
+      const children = folder.querySelector('.tree-children');
+      if (children) children.classList.remove('d-none');
+    }
+  });
+  document.querySelectorAll('#repoTree .tree-file').forEach(file => {
+    file.style.display = (!q || file.dataset.path.includes(q)) ? '' : 'none';
+  });
+}
+
+renderRepoTree();
+document.getElementById('fileSearch').addEventListener('input', filterRepoTree);
+</script>
+{% endblock %}

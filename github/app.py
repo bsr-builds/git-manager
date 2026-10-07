@@ -539,65 +539,6 @@ def create_repo_folder(owner, repo):
     return jsonify({"success": True, "path": folder, "placeholder": keep_path})
 
 
-@app.route("/repo/<owner>/<repo>/file/content")
-def get_repo_file_content(owner, repo):
-    if "access_token" not in session:
-        return jsonify({"success": False, "error": "Unauthorized"}), 401
-    path = (request.args.get("path") or "").strip().lstrip("/")
-    branch = (request.args.get("branch") or "").strip()
-    if not path or path.endswith("/") or ".." in path.split("/"):
-        return jsonify({"success": False, "error": "Enter a valid file path."}), 400
-    params = {"ref": branch} if branch else {}
-    res = requests.get(
-        f"{GITHUB_API_URL}/repos/{owner}/{repo}/contents/{quote(path, safe='/')}",
-        headers=get_headers(), params=params, timeout=15
-    )
-    if res.status_code != 200:
-        return jsonify({"success": False, "error": github_error_message(res, "Could not read file")}), res.status_code
-    data = res.json()
-    if data.get("type") != "file":
-        return jsonify({"success": False, "error": "Selected path is not a file."}), 400
-    try:
-        content = __import__("base64").b64decode((data.get("content") or "").replace("\n", "")).decode("utf-8")
-    except (UnicodeDecodeError, ValueError):
-        return jsonify({"success": False, "error": "This file is binary or is not valid UTF-8 and cannot be edited in the web editor."}), 400
-    return jsonify({"success": True, "path": path, "sha": data.get("sha", ""), "content": content})
-
-
-@app.route("/repo/<owner>/<repo>/file/edit", methods=["POST"])
-def edit_repo_file(owner, repo):
-    if "access_token" not in session:
-        return jsonify({"success": False, "error": "Unauthorized"}), 401
-    data = request.get_json() or {}
-    path = (data.get("path") or "").strip().lstrip("/")
-    branch = (data.get("branch") or "").strip()
-    sha = (data.get("sha") or "").strip()
-    if not path or path.endswith("/") or ".." in path.split("/"):
-        return jsonify({"success": False, "error": "Enter a valid file path."}), 400
-    if not sha:
-        return jsonify({"success": False, "error": "File SHA is required."}), 400
-    try:
-        author_name, author_email = get_commit_author_config(data)
-    except ValueError as e:
-        return jsonify({"success": False, "error": str(e)}), 400
-    payload = {
-        "message": (data.get("commit_message") or f"Update {path}").strip(),
-        "content": __import__("base64").b64encode((data.get("content") or "").encode("utf-8")).decode("ascii"),
-        "sha": sha,
-        "author": {"name": author_name, "email": author_email},
-        "committer": {"name": author_name, "email": author_email},
-    }
-    if branch:
-        payload["branch"] = branch
-    res = requests.put(
-        f"{GITHUB_API_URL}/repos/{owner}/{repo}/contents/{quote(path, safe='/')}",
-        headers=get_headers(), json=payload, timeout=20
-    )
-    if res.status_code not in (200, 201):
-        return jsonify({"success": False, "error": github_error_message(res, "Could not update file")}), res.status_code
-    return jsonify({"success": True, "path": path, "commit": res.json().get("commit", {}).get("sha", "")})
-
-
 @app.route("/repo/<owner>/<repo>/file/delete", methods=["POST"])
 def delete_repo_file(owner, repo):
     if "access_token" not in session:
