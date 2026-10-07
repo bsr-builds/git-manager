@@ -20,7 +20,7 @@ A web application built with Flask that connects to GitHub OAuth, lists all publ
 
 2. **Configure Environment Variables**:
    - Copy `.env.example` to `.env`.
-   - Add your `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, and `FLASK_SECRET_KEY`.
+   - Add your `GA_CLIENT_ID`, `GA_CLIENT_SECRET`, and `FLASK_SECRET_KEY`.
 
 3. **Install and Run**:
    ```bash
@@ -72,6 +72,6 @@ Revoked tokens stop working immediately. Runtime token data is stored under `dat
 
 ## GitHub-issued token generation
 
-The Tokens page can generate a GitHub-issued scoped user token instead of a local `gm_*` token. The existing `GH_CLIENT_ID` / `GH_CLIENT_SECRET` OAuth App remains responsible for the normal Git Manager login. The GitHub App credentials `GA_CLIENT_ID` / `GA_CLIENT_SECRET` are used separately: the Tokens page first authorizes the GitHub App, receives its `ghu_*` user access token, and then calls GitHub's `POST /applications/{client_id}/token/scoped` endpoint with the selected repositories and GitHub permission mapping. The generated `ghu_*` token is stored encrypted locally so Git Manager can use it, while the raw token is shown only once.
+The Tokens page can generate a GitHub-issued scoped user token instead of a local `gm_*` token. The GitHub App credentials `GA_CLIENT_ID` / `GA_CLIENT_SECRET` are responsible for the normal Git Manager login and the in-project token generation flow: the app authorizes the user, receives its `ghu_*` user access token, and then calls GitHub's `POST /applications/{client_id}/token/scoped` endpoint with the selected repositories and GitHub permission mapping. The generated `ghu_*` token is stored encrypted locally so Git Manager can use it, while the raw token is shown only once.
 
-Set `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` for the GitHub application used by the login flow. GitHub Classic PATs cannot be generated through this API; the Classic option opens GitHub's token settings page.
+Set `GA_CLIENT_ID` and `GA_CLIENT_SECRET` for the GitHub App used by the login and in-project token generation flow. GitHub Classic PATs cannot be minted by a GitHub App; Git Manager never redirects to the GitHub PAT settings page for the Normal Token flow.

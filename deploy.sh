@@ -26,8 +26,8 @@ if [[ -z "$CLOUDFLARE_API_TOKEN" ]]; then
   exit 1
 fi
 
-if [[ -z "$GITHUB_CLIENT_ID" || -z "$GITHUB_CLIENT_SECRET" || -z "$GA_CLIENT_ID" || -z "$GA_CLIENT_SECRET" || -z "$FLASK_SECRET_KEY" ]]; then
-  echo "ERROR: GitHub OAuth secrets, GitHub App secrets, and FLASK_SECRET_KEY are required."
+if [[ -z "$GA_CLIENT_ID" || -z "$GA_CLIENT_SECRET" || -z "$FLASK_SECRET_KEY" ]]; then
+  echo "ERROR: GitHub App secrets (GA_CLIENT_ID/GA_CLIENT_SECRET) and FLASK_SECRET_KEY are required."
   exit 1
 fi
 
