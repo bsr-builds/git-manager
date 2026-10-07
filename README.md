@@ -17,6 +17,7 @@ A web application built with Flask that connects to GitHub OAuth, lists all publ
    - Go to GitHub Settings -> Developer Settings -> OAuth Apps -> New OAuth App.
    - Homepage URL: `http://127.0.0.1:5000`
    - Authorization callback URL: `http://127.0.0.1:5000/callback`
+   - The application requests `repo`, `delete_repo`, and `workflow` OAuth scopes when you sign in. These are required for repository management actions such as editing descriptions and files.
 
 2. **Configure Environment Variables**:
    - Copy `.env.example` to `.env`.

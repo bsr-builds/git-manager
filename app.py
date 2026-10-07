@@ -224,12 +224,17 @@ def login():
 
     callback_url = get_external_url("/callback")
 
-    # The GitHub App controls the actual permissions. The OAuth request
-    # supplies the public callback URL exposed by the Cloudflare Worker.
+    # Request the permissions needed by this GitHub OAuth App. The OAuth
+    # request also supplies the public callback URL exposed by the Worker.
     from urllib.parse import urlencode
     params = {
         "client_id": GITHUB_CLIENT_ID,
         "redirect_uri": callback_url,
+        # Request the repository permissions required by repository management
+        # actions (description/file updates, commits, etc.).
+        # delete_repo is required for the repository delete feature and
+        # workflow is retained for GitHub Actions-related operations.
+        "scope": "repo delete_repo workflow",
     }
 
     auth_redirect = f"{GITHUB_AUTH_URL}?{urlencode(params)}"
@@ -426,7 +431,20 @@ def update_repo_settings(owner, repo):
         timeout=8,
     )
     if res.status_code != 200:
-        return jsonify({"success": False, "error": github_error_message(res, "Could not update repository description")}), res.status_code
+        message = github_error_message(res, "Could not update repository description")
+        if res.status_code == 404:
+            message = (
+                "GitHub returned Not Found. The current GitHub account may not have "
+                "write access to this repository, or the OAuth login was authorized "
+                "without the required repository permissions. Log out, log in again, "
+                "and authorize repository access, then retry."
+            )
+        elif res.status_code == 403:
+            message = (
+                "GitHub denied repository changes. Reconnect GitHub and authorize "
+                "repository write access, or use a token with the required permissions."
+            )
+        return jsonify({"success": False, "error": message}), res.status_code
     return jsonify({"success": True, "description": res.json().get("description") or ""})
 
 
