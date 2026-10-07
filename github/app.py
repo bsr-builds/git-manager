@@ -374,69 +374,7 @@ def get_external_base_url():
     return f"{proto}://{host}"
 
 def get_callback_url():
-    # GitHub App callback configured in the GitHub App settings.
     return f"{get_external_base_url()}/callback"
-
-
-def _github_app_oauth_configured():
-    return bool(GITHUB_APP_CLIENT_ID and GITHUB_APP_CLIENT_SECRET)
-
-
-def _github_app_authorize_url():
-    """Start GitHub App user authorization using the App Client ID."""
-    if not _github_app_oauth_configured():
-        return None
-    state = secrets.token_urlsafe(32)
-    # PKCE is strongly recommended by GitHub for the web application flow.
-    verifier = secrets.token_urlsafe(64)
-    challenge = base64.urlsafe_b64encode(
-        hashlib.sha256(verifier.encode("ascii")).digest()
-    ).rstrip(b"=").decode("ascii")
-    session["github_oauth_state"] = state
-    session["github_oauth_verifier"] = verifier
-    session["github_oauth_flow"] = "github_app"
-    callback_url = get_callback_url()
-    params = {
-        "client_id": GITHUB_APP_CLIENT_ID,
-        "redirect_uri": callback_url,
-        "state": state,
-        "code_challenge": challenge,
-        "code_challenge_method": "S256",
-    }
-    return f"{GITHUB_AUTH_URL}?{urlencode(params)}"
-
-
-def _exchange_github_app_code(code):
-    """Exchange a GitHub App authorization code for a user access token."""
-    state = request.args.get("state")
-    expected_state = session.pop("github_oauth_state", None)
-    verifier = session.pop("github_oauth_verifier", None)
-    session.pop("github_oauth_flow", None)
-    if not expected_state or not state or not secrets.compare_digest(expected_state, state):
-        raise RuntimeError("Invalid GitHub OAuth state. Please start the authorization again.")
-    if not verifier:
-        raise RuntimeError("Missing PKCE verifier. Please start the authorization again.")
-    response = requests.post(
-        GITHUB_TOKEN_URL,
-        headers={"Accept": "application/json"},
-        data={
-            "client_id": GITHUB_APP_CLIENT_ID,
-            "client_secret": GITHUB_APP_CLIENT_SECRET,
-            "code": code,
-            "redirect_uri": get_callback_url(),
-            "code_verifier": verifier,
-        },
-        timeout=20,
-    )
-    try:
-        data = response.json()
-    except Exception:
-        data = {}
-    token = data.get("access_token")
-    if not token:
-        detail = data.get("error_description") or data.get("error") or response.text[:300]
-        raise RuntimeError(f"GitHub token exchange failed: {detail}")
-    return token
 
 
 @app.route("/")
@@ -507,72 +445,158 @@ def login_token():
 
 @app.route("/login")
 def login():
-    """Sign in with the configured GitHub App (GA_CLIENT_ID/SECRET)."""
-    auth_url = _github_app_authorize_url()
-    if not auth_url:
-        flash("GitHub App is not configured. Set GA_CLIENT_ID and GA_CLIENT_SECRET.", "danger")
+    if not GITHUB_CLIENT_ID or not GITHUB_CLIENT_SECRET:
+        flash("GitHub App OAuth is not configured.", "danger")
         return redirect(url_for("index"))
-    return redirect(auth_url)
+
+    callback_url = get_external_url("/callback")
+
+    # The GitHub App controls the actual permissions. The OAuth request
+    # supplies the public callback URL exposed by the Cloudflare Worker.
+    from urllib.parse import urlencode
+    params = {
+        "client_id": GITHUB_CLIENT_ID,
+        "redirect_uri": callback_url,
+    }
+
+    auth_redirect = f"{GITHUB_AUTH_URL}?{urlencode(params)}"
+    return redirect(auth_redirect)
 
 
 @app.route("/callback")
 def callback():
-    """Single callback registered in the GitHub App settings."""
-    error = request.args.get("error")
-    if error:
-        session.pop("github_oauth_state", None)
-        session.pop("github_oauth_verifier", None)
-        session.pop("github_oauth_flow", None)
-        flash(f"GitHub authorization failed: {request.args.get('error_description') or error}", "danger")
-        return redirect(url_for("index"))
+    """Handle both the existing GitHub login OAuth callback and GitHub App token flow.
 
+    GitHub App authorization uses the same public callback URL configured in the
+    GitHub App: https://<worker>/callback.  The session state identifies the App
+    flow; ordinary login continues to use GITHUB_CLIENT_ID/GITHUB_CLIENT_SECRET.
+    """
     code = request.args.get("code")
     if not code:
         flash("Authorization failed or was denied.", "danger")
         return redirect(url_for("index"))
-    if not _github_app_oauth_configured():
-        flash("GitHub App is not configured. Set GA_CLIENT_ID and GA_CLIENT_SECRET.", "danger")
-        return redirect(url_for("index"))
 
-    try:
-        token = _exchange_github_app_code(code)
-        user_res = requests.get(
-            f"{GITHUB_API_URL}/user",
-            headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2026-03-10"},
+    # ------------------------------------------------------------------
+    # GitHub App token flow (GA_CLIENT_ID / GA_CLIENT_SECRET)
+    # ------------------------------------------------------------------
+    app_state = session.get("github_app_oauth_state")
+    returned_state = request.args.get("state")
+    if app_state and returned_state and secrets.compare_digest(app_state, returned_state):
+        session.pop("github_app_oauth_state", None)
+
+        if not GITHUB_APP_CLIENT_ID or not GITHUB_APP_CLIENT_SECRET:
+            flash("GitHub App is not configured. Set GA_CLIENT_ID and GA_CLIENT_SECRET.", "danger")
+            return redirect(url_for("manage_tokens")) if current_auth() else redirect(url_for("index"))
+
+        callback_url = get_external_url("/callback")
+        response = requests.post(
+            GITHUB_TOKEN_URL,
+            headers={"Accept": "application/json"},
+            data={
+                "client_id": GITHUB_APP_CLIENT_ID,
+                "client_secret": GITHUB_APP_CLIENT_SECRET,
+                "code": code,
+                "redirect_uri": callback_url,
+            },
             timeout=20,
         )
-        if not user_res.ok:
-            raise RuntimeError(f"GitHub user lookup failed: HTTP {user_res.status_code}")
-        user = user_res.json()
-        session["access_token"] = token
-        session["user"] = user
-        session["auth_type"] = "github_app"
-        session["github_app_access_token"] = token
-        session["github_app_user"] = user
+        try:
+            data = response.json()
+        except Exception:
+            data = {}
+        app_user_token = data.get("access_token")
+        if not app_user_token:
+            flash(
+                f"GitHub App authorization failed: {data.get('error_description') or data.get('error') or 'no access token returned'}",
+                "danger",
+            )
+            return redirect(url_for("manage_tokens")) if current_auth() else redirect(url_for("index"))
 
-        # If Generate GitHub Token was submitted before authorization, finish
-        # that exact request automatically. No second click is required.
+        session["github_app_access_token"] = app_user_token
+        user_res = requests.get(
+            f"{GITHUB_API_URL}/user",
+            headers={"Authorization": f"Bearer {app_user_token}", "Accept": "application/vnd.github+json"},
+            timeout=20,
+        )
+        app_user = user_res.json() if user_res.ok else {}
+        session["github_app_user"] = app_user
+
+        # If token generation was waiting for authorization, finish it now.
         pending = session.pop("pending_token_form", None)
-        if pending:
-            return _create_github_scoped_token_from_form(pending, token, user)
+        if pending and current_auth():
+            try:
+                github_permissions = _github_scoped_permissions(pending.get("permissions", []))
+                data = _github_create_scoped_token(
+                    app_user_token,
+                    app_user.get("login") or (session.get("user") or {}).get("login"),
+                    pending.get("repositories", []),
+                    github_permissions,
+                )
+                token = data["token"]
+                expires_at = data.get("expires_at")
+                db = _token_db()
+                try:
+                    db.execute(
+                        """INSERT INTO access_tokens
+                           (name, token_hash, token_prefix, token_type, permissions, github_token,
+                            github_login, created_at, expires_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            pending["name"], _token_hash(token), token[:14] + "…", "github_scoped",
+                            json.dumps(pending.get("permissions", [])),
+                            TOKEN_CIPHER.encrypt(token.encode()).decode(),
+                            app_user.get("login") or (session.get("user") or {}).get("login", "GitHub User"),
+                            _now_iso(), expires_at,
+                        ),
+                    )
+                    db.commit()
+                finally:
+                    db.close()
+                flash("GitHub App authorized and the GitHub Normal Token was generated successfully.", "success")
+                return render_template(
+                    "token_created.html",
+                    token=token,
+                    name=pending["name"],
+                    token_type="github_scoped",
+                    permissions=[TOKEN_PERMISSIONS[p] for p in pending.get("permissions", [])],
+                    expires_at=expires_at,
+                    github_issued=True,
+                )
+            except Exception as exc:
+                flash(f"GitHub token creation failed after authorization: {exc}", "danger")
 
-        flash(f"Connected successfully as {user.get('login', 'User')}!", "success")
-        return redirect(url_for("list_repos"))
-    except Exception as exc:
-        flash(str(exc), "danger")
+        flash("GitHub App connected successfully. You can now generate a GitHub Normal Token.", "success")
+        return redirect(url_for("manage_tokens"))
+
+    # ------------------------------------------------------------------
+    # Existing Git Manager login OAuth flow
+    # ------------------------------------------------------------------
+    if not GITHUB_CLIENT_ID or not GITHUB_CLIENT_SECRET:
+        flash("GitHub login OAuth is not configured.", "danger")
         return redirect(url_for("index"))
 
+    response = requests.post(
+        GITHUB_TOKEN_URL,
+        headers={"Accept": "application/json"},
+        data={
+            "client_id": GITHUB_CLIENT_ID,
+            "client_secret": GITHUB_CLIENT_SECRET,
+            "code": code,
+            "redirect_uri": get_external_url("/callback"),
+        },
+        timeout=20,
+    )
+    data = response.json()
+    token = data.get("access_token")
+    if token:
+        session["access_token"] = token
+        user_res = requests.get(f"{GITHUB_API_URL}/user", headers={"Authorization": f"Bearer {token}"}, timeout=20)
+        if user_res.status_code == 200:
+            session["user"] = user_res.json()
+        return redirect(url_for("list_repos"))
 
-# Backward-compatible endpoint. It now uses the same /callback registered in
-# GitHub, so the project never sends the user to GitHub's PAT settings page.
-@app.route("/github-app/connect")
-@require_session
-def github_app_connect():
-    auth_url = _github_app_authorize_url()
-    if not auth_url:
-        flash("GitHub App is not configured. Set GA_CLIENT_ID and GA_CLIENT_SECRET.", "danger")
-        return redirect(url_for("manage_tokens"))
-    return redirect(auth_url)
+    flash(f"Failed to obtain access token: {data.get('error_description') or data.get('error')}", "danger")
+    return redirect(url_for("index"))
 
 
 @app.route("/github-app/disconnect", methods=["POST"])
@@ -683,40 +707,71 @@ def _github_create_scoped_token(user_token, target, repositories, permissions):
         raise RuntimeError("GitHub did not return an access token")
     return data
 
-def _create_github_scoped_token_from_form(form, app_user_token, app_user):
-    """Create and persist the GitHub-issued scoped token for a pending form."""
-    name = (form.get("name") or "").strip()
-    permissions = [p for p in form.get("permissions", []) if p in TOKEN_PERMISSIONS]
-    repositories = [r.strip() for r in form.get("repositories", []) if r.strip()]
-    if not name or not permissions:
-        flash("The pending token request is incomplete. Please generate it again.", "warning")
+@app.route("/tokens/create", methods=["POST"])
+@require_session
+def create_app_token():
+    name = (request.form.get("name") or "").strip()
+    token_type = (request.form.get("token_type") or "normal").strip().lower()
+    raw_permissions = request.form.getlist("permissions")
+    permissions = [p for p in raw_permissions if p in TOKEN_PERMISSIONS]
+    repositories = [r.strip() for r in request.form.getlist("repositories") if r.strip()]
+    if not name:
+        flash("Token name is required.", "warning")
+        return redirect(url_for("manage_tokens"))
+    if not permissions:
+        flash("Select at least one permission.", "warning")
         return redirect(url_for("manage_tokens"))
 
-    github_permissions = _github_scoped_permissions(permissions)
-    if not github_permissions:
-        flash("The selected permissions cannot be mapped to GitHub App permissions.", "danger")
+    auth = current_auth()
+    if not auth or not auth.get("github_token"):
+        flash("A valid GitHub login is required to create a token.", "danger")
+        return redirect(url_for("index"))
+
+    if token_type == "classic":
+        flash('GitHub Classic PATs cannot be generated inside Git Manager or by a GitHub App. Select "GitHub Normal Token" to generate a GitHub-issued scoped token inside Git Manager.', "warning")
+        return redirect(url_for("manage_tokens"))
+    token_type = "github_scoped"
+
+    try:
+        github_permissions = _github_scoped_permissions(permissions)
+        app_user_token = session.get("github_app_access_token")
+        app_user = session.get("github_app_user") or {}
+        if not app_user_token:
+            session["pending_token_form"] = {
+                "name": name,
+                "token_type": token_type,
+                "permissions": permissions,
+                "repositories": repositories,
+            }
+            flash("Connect your GitHub App first. After authorization, your GitHub Normal Token will be generated automatically.", "info")
+            return redirect(url_for("github_app_connect"))
+        data = _github_create_scoped_token(
+            app_user_token,
+            app_user.get("login") or auth.get("login") or (session.get("user") or {}).get("login"),
+            repositories,
+            github_permissions,
+        )
+    except Exception as exc:
+        flash(f"GitHub token creation failed: {exc}", "danger")
         return redirect(url_for("manage_tokens"))
 
-    data = _github_create_scoped_token(
-        app_user_token,
-        app_user.get("login") or (session.get("user") or {}).get("login"),
-        repositories,
-        github_permissions,
-    )
     token = data["token"]
     expires_at = data.get("expires_at")
     db = _token_db()
     try:
+        # Keep the GitHub-issued token encrypted locally so Git Manager can
+        # use it for API calls. The raw token is never shown again after this response.
         db.execute(
             """INSERT INTO access_tokens
                (name, token_hash, token_prefix, token_type, permissions, github_token,
                 github_login, created_at, expires_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                name, _token_hash(token), token[:14] + "…", "github_scoped",
+                name, _token_hash(token), token[:14] + "…", token_type,
                 json.dumps(permissions), TOKEN_CIPHER.encrypt(token.encode()).decode(),
-                app_user.get("login") or (session.get("user") or {}).get("login", "GitHub User"),
-                _now_iso(), expires_at,
+                (session.get("github_app_user") or {}).get("login") or auth.get("login") or (session.get("user") or {}).get("login", "GitHub User"),
+                _now_iso(),
+                expires_at,
             ),
         )
         db.commit()
@@ -727,62 +782,11 @@ def _create_github_scoped_token_from_form(form, app_user_token, app_user):
         "token_created.html",
         token=token,
         name=name,
-        token_type="github_scoped",
+        token_type=token_type,
         permissions=[TOKEN_PERMISSIONS[p] for p in permissions],
         expires_at=expires_at,
         github_issued=True,
     )
-
-
-@app.route("/tokens/create", methods=["POST"])
-@require_session
-def create_app_token():
-    name = (request.form.get("name") or "").strip()
-    token_type = (request.form.get("token_type") or "normal").strip().lower()
-    permissions = [p for p in request.form.getlist("permissions") if p in TOKEN_PERMISSIONS]
-    repositories = [r.strip() for r in request.form.getlist("repositories") if r.strip()]
-    if not name:
-        flash("Token name is required.", "warning")
-        return redirect(url_for("manage_tokens"))
-    if not permissions:
-        flash("Select at least one permission.", "warning")
-        return redirect(url_for("manage_tokens"))
-
-    if token_type == "classic":
-        # A GitHub Classic PAT cannot be minted by an application. Do not
-        # redirect to /settings/tokens; keep the user inside this project.
-        flash("Classic PATs cannot be generated by a GitHub App. Select 'GitHub Normal Token' to generate it inside Git Manager.", "warning")
-        return redirect(url_for("manage_tokens"))
-
-    auth = current_auth()
-    if not auth or not auth.get("github_token"):
-        flash("A valid GitHub App login is required to create a token.", "danger")
-        return redirect(url_for("index"))
-
-    app_user_token = session.get("github_app_access_token") or auth.get("github_token")
-    app_user = session.get("github_app_user") or session.get("user") or {}
-    if not app_user_token or not app_user_token.startswith("ghu_"):
-        session["pending_token_form"] = {
-            "name": name,
-            "permissions": permissions,
-            "repositories": repositories,
-        }
-        auth_url = _github_app_authorize_url()
-        if not auth_url:
-            flash("GitHub App is not configured. Set GA_CLIENT_ID and GA_CLIENT_SECRET.", "danger")
-            return redirect(url_for("manage_tokens"))
-        return redirect(auth_url)
-
-    try:
-        return _create_github_scoped_token_from_form(
-            {"name": name, "permissions": permissions, "repositories": repositories},
-            app_user_token,
-            app_user,
-        )
-    except Exception as exc:
-        flash(f"GitHub token creation failed: {exc}", "danger")
-        return redirect(url_for("manage_tokens"))
-
 
 @app.route("/tokens/<int:token_id>/revoke", methods=["POST"])
 @require_permission("repos:read")
