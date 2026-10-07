@@ -46,3 +46,32 @@ The repository manager now provides:
 - Commit author selection for file-management commits: current GitHub account or a manually entered author name/email.
 
 Open **Manage** from the repository list to use these controls.
+
+## Application Access Tokens
+
+After signing in to GitHub, open **Tokens** in the top navigation to generate scoped Git Manager API tokens. Each token has a name and selected permissions. The full token is displayed only once; the database stores only a hash of the token and an encrypted copy of the GitHub credential needed to perform GitHub operations.
+
+Use generated tokens with API requests as:
+
+```text
+Authorization: Bearer gm_...
+```
+
+Supported permissions:
+- `repos:read`
+- `repos:settings`
+- `repos:delete`
+- `files:read`
+- `files:write`
+- `files:delete`
+- `commits:read`
+- `commits:write`
+
+Revoked tokens stop working immediately. Runtime token data is stored under `data/`, which is ignored by Git.
+
+
+## GitHub-issued token generation
+
+The Tokens page can generate a GitHub-issued scoped user token instead of a local `gm_*` token. The existing `GH_CLIENT_ID` / `GH_CLIENT_SECRET` OAuth App remains responsible for the normal Git Manager login. The GitHub App credentials `GA_CLIENT_ID` / `GA_CLIENT_SECRET` are used separately: the Tokens page first authorizes the GitHub App, receives its `ghu_*` user access token, and then calls GitHub's `POST /applications/{client_id}/token/scoped` endpoint with the selected repositories and GitHub permission mapping. The generated `ghu_*` token is stored encrypted locally so Git Manager can use it, while the raw token is shown only once.
+
+Set `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` for the GitHub application used by the login flow. GitHub Classic PATs cannot be generated through this API; the Classic option opens GitHub's token settings page.

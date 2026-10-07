@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-12 col-lg-8">
+    <div class="card shadow-sm border-0">
+      <div class="card-body p-3 p-sm-4">
+        <div class="alert alert-warning small">
+          <strong>Save this token now.</strong> For security, the full token is shown only once and cannot be recovered later.
+        </div>
+        <h5 class="fw-bold mb-1">Token created: {{ name }}</h5>
+        <div class="mb-2"><span class="badge {{ 'text-bg-warning' if token_type == 'classic' else 'text-bg-primary' }}">{{ 'Classic Token' if token_type == 'classic' else 'GitHub Scoped Token' if github_issued else 'Legacy Token' }}</span></div>
+        <p class="text-muted small mb-2">This token was issued by GitHub and works directly with the GitHub REST API. Copy it now; GitHub tokens are shown here only once.</p>
+        <div class="input-group input-group-sm mb-3">
+          <input id="newToken" class="form-control font-monospace" value="{{ token }}" readonly>
+          <button class="btn btn-outline-secondary" type="button" onclick="copyToken(this)"><i class="bi bi-copy"></i> Copy</button>
+        </div>
+        {% if expires_at %}<div class="small text-muted mb-2">Expires: {{ expires_at }}</div>{% endif %}
+        <div class="small mb-3">
+          <strong>Allowed permissions:</strong>
+          {% for p in permissions %}<span class="badge text-bg-light border me-1">{{ p }}</span>{% endfor %}
+        </div>
+        <a href="{{ url_for('manage_tokens') }}" class="btn btn-primary btn-sm">Back to Tokens</a>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+function copyToken(btn) {
+  const input = document.getElementById('newToken');
+  navigator.clipboard.writeText(input.value).then(() => {
+    btn.innerHTML = '<i class="bi bi-check"></i> Copied';
+    setTimeout(() => btn.innerHTML = '<i class="bi bi-copy"></i> Copy', 1500);
+  });
+}
+</script>
+{% endblock %}

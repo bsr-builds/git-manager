@@ -1,13 +1,22 @@
 import os
 import shutil
+import sqlite3
+import secrets
+import hashlib
+import json
+import base64
+from datetime import datetime, timezone
+from functools import wraps
+from cryptography.fernet import Fernet, InvalidToken
+from flask import g
 import subprocess
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 import requests
-from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify, Response
+from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify, Response, g
 from dotenv import load_dotenv
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 load_dotenv()
 
@@ -16,6 +25,8 @@ app.secret_key = os.getenv("FLASK_SECRET_KEY", "dev-secret-key-change-in-product
 
 GITHUB_CLIENT_ID = os.getenv("GITHUB_CLIENT_ID")
 GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET")
+GITHUB_APP_CLIENT_ID = os.getenv("GA_CLIENT_ID") or os.getenv("GITHUB_APP_CLIENT_ID")
+GITHUB_APP_CLIENT_SECRET = os.getenv("GA_CLIENT_SECRET") or os.getenv("GITHUB_APP_CLIENT_SECRET")
 EXTERNAL_BASE_URL = os.getenv("EXTERNAL_BASE_URL", "").rstrip("/")
 GITHUB_AUTH_URL = "https://github.com/login/oauth/authorize"
 GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
@@ -38,8 +49,224 @@ def get_external_url(path="/"):
 CI_CACHE = {}
 
 
+# ---------------------------------------------------------------------------
+# Application access tokens
+# ---------------------------------------------------------------------------
+# These are NOT GitHub PATs. They are scoped credentials for this Git Manager.
+# A generated token is shown only once. Only a SHA-256 hash is stored.
+TOKEN_DB_PATH = os.getenv(
+    "APP_TOKEN_DB_PATH",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "access_tokens.db"),
+)
+TOKEN_ENCRYPTION_SECRET = os.getenv("APP_TOKEN_ENCRYPTION_SECRET", "")
+if not TOKEN_ENCRYPTION_SECRET:
+    # Stable across workers/restarts as long as FLASK_SECRET_KEY remains stable.
+    TOKEN_ENCRYPTION_SECRET = app.secret_key
+TOKEN_FERNET_KEY = base64.urlsafe_b64encode(
+    hashlib.sha256(("git-manager-token:" + TOKEN_ENCRYPTION_SECRET).encode("utf-8")).digest()
+)
+TOKEN_CIPHER = Fernet(TOKEN_FERNET_KEY)
+TOKEN_PREFIX = "gm_"
+
+TOKEN_PERMISSION_GROUPS = {
+    "Repository": {
+        "metadata:read": "View repository metadata and basic information",
+        "repos:read": "View repositories, branches and repository data",
+        "repos:settings": "Edit repository description, visibility and settings",
+        "repos:delete": "Delete repositories",
+        "branches:read": "View branches and branch information",
+        "branches:write": "Create, rename and manage branches",
+    },
+    "Contents": {
+        "files:read": "Read file contents and download repositories",
+        "files:write": "Create, upload and edit files/folders",
+        "files:delete": "Delete repository files",
+    },
+    "Issues": {
+        "issues:read": "View issues, labels, milestones and comments",
+        "issues:write": "Create, edit and close issues and comments",
+    },
+    "Pull Requests": {
+        "pulls:read": "View pull requests, reviews and comments",
+        "pulls:write": "Create, edit, merge and close pull requests",
+    },
+    "Commits": {
+        "commits:read": "View commits and commit details",
+        "commits:write": "Create, restore and manage commits",
+    },
+    "Actions": {
+        "actions:read": "View workflows, runs and artifacts",
+        "actions:write": "Run, cancel and manage workflow runs",
+    },
+    "Releases": {
+        "releases:read": "View releases and release assets",
+        "releases:write": "Create, edit and delete releases",
+    },
+    "Webhooks": {
+        "webhooks:read": "View repository webhooks",
+        "webhooks:write": "Create, edit and delete repository webhooks",
+    },
+    "Administration": {
+        "collaborators:read": "View repository collaborators and access",
+        "collaborators:write": "Manage repository collaborators and access",
+        "deployments:read": "View deployments and deployment status",
+        "deployments:write": "Create and manage deployments",
+    },
+}
+
+TOKEN_PERMISSIONS = {
+    key: description
+    for group in TOKEN_PERMISSION_GROUPS.values()
+    for key, description in group.items()
+}
+
+def _token_db():
+    os.makedirs(os.path.dirname(TOKEN_DB_PATH) or ".", exist_ok=True)
+    db = sqlite3.connect(TOKEN_DB_PATH, timeout=10)
+    db.row_factory = sqlite3.Row
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS access_tokens (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            token_hash TEXT NOT NULL UNIQUE,
+            token_prefix TEXT NOT NULL,
+            token_type TEXT NOT NULL DEFAULT 'normal',
+            permissions TEXT NOT NULL,
+            github_token TEXT NOT NULL,
+            github_login TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            last_used_at TEXT,
+            revoked_at TEXT,
+            expires_at TEXT
+        )
+    """)
+    # Backward-compatible migration for databases created before token types.
+    columns = {row[1] for row in db.execute("PRAGMA table_info(access_tokens)").fetchall()}
+    if "token_type" not in columns:
+        db.execute("ALTER TABLE access_tokens ADD COLUMN token_type TEXT NOT NULL DEFAULT 'normal'")
+    if "expires_at" not in columns:
+        db.execute("ALTER TABLE access_tokens ADD COLUMN expires_at TEXT")
+    db.commit()
+    return db
+
+def _token_hash(token):
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+def _now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+def _get_bearer_token():
+    auth = request.headers.get("Authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return None
+
+def _resolve_token(token):
+    # Accept both legacy Git Manager tokens (gm_*) and GitHub-issued scoped
+    # user tokens (ghu_*) created through the GitHub API below.
+    if not token:
+        return None
+    db = _token_db()
+    try:
+        row = db.execute(
+            "SELECT * FROM access_tokens WHERE token_hash = ? AND revoked_at IS NULL",
+            (_token_hash(token),),
+        ).fetchone()
+        if not row:
+            return None
+        try:
+            github_token = TOKEN_CIPHER.decrypt(row["github_token"].encode()).decode()
+        except (InvalidToken, ValueError):
+            return None
+        db.execute(
+            "UPDATE access_tokens SET last_used_at = ? WHERE id = ?",
+            (_now_iso(), row["id"]),
+        )
+        db.commit()
+        return {
+            "type": "token",
+            "id": row["id"],
+            "name": row["name"],
+            "token_type": row["token_type"] or "normal",
+            "login": row["github_login"],
+            "permissions": set(json.loads(row["permissions"])),
+            "github_token": github_token,
+        }
+    finally:
+        db.close()
+
+def current_auth():
+    auth = getattr(g, "auth_context", None)
+    if auth:
+        return auth
+    bearer = _get_bearer_token()
+    if bearer:
+        auth = _resolve_token(bearer)
+        if auth:
+            g.auth_context = auth
+            return auth
+        return None
+    if session.get("access_token"):
+        auth = {
+            "type": "session",
+            "login": (session.get("user") or {}).get("login", ""),
+            "permissions": set(TOKEN_PERMISSIONS.keys()),
+            "github_token": session.get("access_token"),
+        }
+        g.auth_context = auth
+        return auth
+    return None
+
+def get_auth_github_token():
+    auth = current_auth()
+    return auth.get("github_token") if auth else None
+
+def require_permission(permission):
+    """Allow normal logged-in browser sessions fully; scope generated tokens."""
+    def decorator(view):
+        @wraps(view)
+        def wrapped(*args, **kwargs):
+            auth = current_auth()
+            if not auth:
+                if request.path.startswith("/api/") or request.is_json:
+                    return jsonify({"success": False, "error": "Unauthorized"}), 401
+                return redirect(url_for("index"))
+            if auth["type"] == "token" and permission not in auth["permissions"]:
+                return jsonify({
+                    "success": False,
+                    "error": f"Token does not have the required permission: {permission}"
+                }), 403
+            return view(*args, **kwargs)
+        return wrapped
+    return decorator
+
+def require_session(view):
+    """Token administration is intentionally limited to the interactive GitHub login."""
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if not session.get("access_token"):
+            if request.path.startswith("/api/") or request.is_json:
+                return jsonify({"success": False, "error": "Unauthorized"}), 401
+            return redirect(url_for("index"))
+        return view(*args, **kwargs)
+    return wrapped
+
+def _token_list():
+    db = _token_db()
+    try:
+        rows = db.execute(
+            """SELECT id, name, token_prefix, token_type, permissions, github_login,
+                      created_at, last_used_at, revoked_at, expires_at
+               FROM access_tokens ORDER BY id DESC"""
+        ).fetchall()
+        return [dict(r) | {"permissions": json.loads(r["permissions"])} for r in rows]
+    finally:
+        db.close()
+
+
+
 def get_headers():
-    token = session.get("access_token")
+    token = get_auth_github_token()
     return {
         "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",
@@ -267,6 +494,295 @@ def callback():
     return redirect(url_for("index"))
 
 
+
+@app.route("/github-app/connect")
+@require_session
+def github_app_connect():
+    if not GITHUB_APP_CLIENT_ID or not GITHUB_APP_CLIENT_SECRET:
+        flash("GitHub App is not configured. Set GA_CLIENT_ID and GA_CLIENT_SECRET.", "danger")
+        return redirect(url_for("manage_tokens"))
+
+    state = secrets.token_urlsafe(32)
+    session["github_app_oauth_state"] = state
+    callback_url = get_external_url("/github-app/callback")
+    params = {
+        "client_id": GITHUB_APP_CLIENT_ID,
+        "redirect_uri": callback_url,
+        "state": state,
+    }
+    return redirect(f"{GITHUB_AUTH_URL}?{urlencode(params)}")
+
+
+@app.route("/github-app/callback")
+@require_session
+def github_app_callback():
+    expected_state = session.pop("github_app_oauth_state", None)
+    state = request.args.get("state")
+    if not expected_state or not state or not secrets.compare_digest(expected_state, state):
+        flash("GitHub App authorization failed: invalid state.", "danger")
+        return redirect(url_for("manage_tokens"))
+
+    code = request.args.get("code")
+    if not code:
+        flash("GitHub App authorization was denied or failed.", "danger")
+        return redirect(url_for("manage_tokens"))
+    if not GITHUB_APP_CLIENT_ID or not GITHUB_APP_CLIENT_SECRET:
+        flash("GitHub App is not configured. Set GA_CLIENT_ID and GA_CLIENT_SECRET.", "danger")
+        return redirect(url_for("manage_tokens"))
+
+    callback_url = get_external_url("/github-app/callback")
+    response = requests.post(
+        GITHUB_TOKEN_URL,
+        headers={"Accept": "application/json"},
+        data={
+            "client_id": GITHUB_APP_CLIENT_ID,
+            "client_secret": GITHUB_APP_CLIENT_SECRET,
+            "code": code,
+            "redirect_uri": callback_url,
+        },
+        timeout=20,
+    )
+    try:
+        data = response.json()
+    except Exception:
+        data = {}
+    token = data.get("access_token")
+    if not token:
+        flash(f"GitHub App authorization failed: {data.get('error_description') or data.get('error') or 'no access token returned'}", "danger")
+        return redirect(url_for("manage_tokens"))
+
+    session["github_app_access_token"] = token
+    user_res = requests.get(
+        f"{GITHUB_API_URL}/user",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+        timeout=20,
+    )
+    if user_res.ok:
+        session["github_app_user"] = user_res.json()
+
+    flash("GitHub App connected successfully. You can now generate GitHub scoped tokens.", "success")
+    return redirect(url_for("manage_tokens"))
+
+
+@app.route("/github-app/disconnect", methods=["POST"])
+@require_session
+def github_app_disconnect():
+    session.pop("github_app_access_token", None)
+    session.pop("github_app_user", None)
+    flash("GitHub App disconnected.", "success")
+    return redirect(url_for("manage_tokens"))
+
+
+@app.route("/tokens")
+@require_session
+def manage_tokens():
+    repos = []
+    token = get_auth_github_token()
+    if token:
+        try:
+            r = requests.get(
+                f"{GITHUB_API_URL}/user/repos?per_page=100&sort=updated",
+                headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+                timeout=15,
+            )
+            if r.ok:
+                repos = r.json()
+        except requests.RequestException:
+            pass
+    app_user = session.get("github_app_user") or {}
+    return render_template(
+        "tokens.html",
+        tokens=_token_list(),
+        permissions=TOKEN_PERMISSIONS,
+        permission_groups=TOKEN_PERMISSION_GROUPS,
+        repositories=repos,
+        github_app_configured=bool(GITHUB_APP_CLIENT_ID and GITHUB_APP_CLIENT_SECRET),
+        github_app_connected=bool(session.get("github_app_access_token")),
+        github_app_login=app_user.get("login", ""),
+    )
+
+GITHUB_PERMISSION_MAP = {
+    "metadata:read": ("metadata", "read"),
+    "repos:read": ("metadata", "read"),
+    "repos:settings": ("administration", "write"),
+    "repos:delete": ("administration", "write"),
+    "branches:read": ("contents", "read"),
+    "branches:write": ("contents", "write"),
+    "files:read": ("contents", "read"),
+    "files:write": ("contents", "write"),
+    "files:delete": ("contents", "write"),
+    "issues:read": ("issues", "read"),
+    "issues:write": ("issues", "write"),
+    "pulls:read": ("pull_requests", "read"),
+    "pulls:write": ("pull_requests", "write"),
+    "commits:read": ("contents", "read"),
+    "commits:write": ("contents", "write"),
+    "actions:read": ("actions", "read"),
+    "actions:write": ("actions", "write"),
+    "releases:read": ("contents", "read"),
+    "releases:write": ("contents", "write"),
+    "webhooks:read": ("repository_hooks", "read"),
+    "webhooks:write": ("repository_hooks", "write"),
+    "collaborators:read": ("administration", "read"),
+    "collaborators:write": ("administration", "write"),
+    "deployments:read": ("deployments", "read"),
+    "deployments:write": ("deployments", "write"),
+}
+
+def _github_scoped_permissions(permissions):
+    result = {}
+    for key in permissions:
+        mapped = GITHUB_PERMISSION_MAP.get(key)
+        if not mapped:
+            continue
+        name, level = mapped
+        previous = result.get(name)
+        if previous == "write" or level == previous:
+            continue
+        result[name] = level
+    return result
+
+def _github_create_scoped_token(user_token, target, repositories, permissions):
+    if not GITHUB_APP_CLIENT_ID or not GITHUB_APP_CLIENT_SECRET:
+        raise RuntimeError("GitHub App is not configured. Set GA_CLIENT_ID and GA_CLIENT_SECRET")
+    if not user_token or not user_token.startswith("ghu_"):
+        raise RuntimeError("Connect the GitHub App first; a GitHub App user access token (ghu_...) is required")
+    payload = {
+        "access_token": user_token,
+        "target": target,
+        "permissions": permissions,
+    }
+    if repositories:
+        payload["repositories"] = repositories
+    response = requests.post(
+        f"{GITHUB_API_URL}/applications/{GITHUB_APP_CLIENT_ID}/token/scoped",
+        auth=(GITHUB_APP_CLIENT_ID, GITHUB_APP_CLIENT_SECRET),
+        headers={"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2026-03-10"},
+        json=payload,
+        timeout=20,
+    )
+    if response.status_code != 200:
+        try:
+            detail = response.json().get("message") or response.json().get("error")
+        except Exception:
+            detail = None
+        raise RuntimeError(detail or f"GitHub returned HTTP {response.status_code}")
+    data = response.json()
+    if not data.get("token"):
+        raise RuntimeError("GitHub did not return an access token")
+    return data
+
+@app.route("/tokens/create", methods=["POST"])
+@require_session
+def create_app_token():
+    name = (request.form.get("name") or "").strip()
+    token_type = (request.form.get("token_type") or "normal").strip().lower()
+    raw_permissions = request.form.getlist("permissions")
+    permissions = [p for p in raw_permissions if p in TOKEN_PERMISSIONS]
+    repositories = [r.strip() for r in request.form.getlist("repositories") if r.strip()]
+    if not name:
+        flash("Token name is required.", "warning")
+        return redirect(url_for("manage_tokens"))
+    if not permissions:
+        flash("Select at least one permission.", "warning")
+        return redirect(url_for("manage_tokens"))
+
+    auth = current_auth()
+    if not auth or not auth.get("github_token"):
+        flash("A valid GitHub login is required to create a token.", "danger")
+        return redirect(url_for("index"))
+
+    if token_type == "classic":
+        flash("GitHub Classic PATs cannot be created programmatically. Use GitHub's Classic PAT page to create one, then import/use it here.", "warning")
+        return redirect("https://github.com/settings/tokens")
+    token_type = "github_scoped"
+
+    try:
+        github_permissions = _github_scoped_permissions(permissions)
+        app_user_token = session.get("github_app_access_token")
+        app_user = session.get("github_app_user") or {}
+        if not app_user_token:
+            session["pending_token_form"] = {
+                "name": name,
+                "token_type": token_type,
+                "permissions": permissions,
+                "repositories": repositories,
+            }
+            flash("Connect your GitHub App first. After authorization, submit Generate GitHub Token again.", "warning")
+            return redirect(url_for("github_app_connect"))
+        data = _github_create_scoped_token(
+            app_user_token,
+            app_user.get("login") or auth.get("login") or (session.get("user") or {}).get("login"),
+            repositories,
+            github_permissions,
+        )
+    except Exception as exc:
+        flash(f"GitHub token creation failed: {exc}", "danger")
+        return redirect(url_for("manage_tokens"))
+
+    token = data["token"]
+    expires_at = data.get("expires_at")
+    db = _token_db()
+    try:
+        # Keep the GitHub-issued token encrypted locally so Git Manager can
+        # use it for API calls. The raw token is never shown again after this response.
+        db.execute(
+            """INSERT INTO access_tokens
+               (name, token_hash, token_prefix, token_type, permissions, github_token,
+                github_login, created_at, expires_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                name, _token_hash(token), token[:14] + "…", token_type,
+                json.dumps(permissions), TOKEN_CIPHER.encrypt(token.encode()).decode(),
+                (session.get("github_app_user") or {}).get("login") or auth.get("login") or (session.get("user") or {}).get("login", "GitHub User"),
+                _now_iso(),
+                expires_at,
+            ),
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    return render_template(
+        "token_created.html",
+        token=token,
+        name=name,
+        token_type=token_type,
+        permissions=[TOKEN_PERMISSIONS[p] for p in permissions],
+        expires_at=expires_at,
+        github_issued=True,
+    )
+
+@app.route("/tokens/<int:token_id>/revoke", methods=["POST"])
+@require_permission("repos:read")
+def revoke_app_token(token_id):
+    db = _token_db()
+    try:
+        row = db.execute("SELECT * FROM access_tokens WHERE id = ? AND revoked_at IS NULL", (token_id,)).fetchone()
+        if not row:
+            flash("Token not found or already revoked.", "warning")
+            return redirect(url_for("manage_tokens"))
+        try:
+            raw = TOKEN_CIPHER.decrypt(row["github_token"].encode()).decode()
+            if row["token_type"] == "github_scoped" and GITHUB_APP_CLIENT_ID and GITHUB_APP_CLIENT_SECRET:
+                requests.delete(
+                    f"{GITHUB_API_URL}/applications/{GITHUB_APP_CLIENT_ID}/token",
+                    auth=(GITHUB_APP_CLIENT_ID, GITHUB_APP_CLIENT_SECRET),
+                    headers={"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2026-03-10"},
+                    json={"access_token": raw}, timeout=20,
+                )
+        except Exception:
+            pass
+        db.execute(
+            "UPDATE access_tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+            (_now_iso(), token_id),
+        )
+        db.commit()
+    finally:
+        db.close()
+    flash("Token revoked successfully.", "success")
+    return redirect(url_for("manage_tokens"))
+
 @app.route("/logout")
 def logout():
     session.clear()
@@ -275,8 +791,9 @@ def logout():
 
 
 @app.route("/repos")
+@require_permission("repos:read")
 def list_repos():
-    if "access_token" not in session:
+    if not current_auth():
         return redirect(url_for("index"))
 
     repos = []
@@ -361,8 +878,9 @@ def get_commit_author_config(data=None):
 
 
 @app.route("/repo/<owner>/<repo>/manage")
+@require_permission("repos:read")
 def manage_repo(owner, repo):
-    if "access_token" not in session:
+    if not current_auth():
         return redirect(url_for("index"))
 
     headers = get_headers()
@@ -407,8 +925,9 @@ def manage_repo(owner, repo):
 
 
 @app.route("/repo/<owner>/<repo>/settings", methods=["POST"])
+@require_permission("repos:settings")
 def update_repo_settings(owner, repo):
-    if "access_token" not in session:
+    if not current_auth():
         return jsonify({"success": False, "error": "Unauthorized"}), 401
 
     data = request.get_json() or {}
@@ -431,8 +950,9 @@ def update_repo_settings(owner, repo):
 
 
 @app.route("/repo/<owner>/<repo>/delete", methods=["POST"])
+@require_permission("repos:delete")
 def delete_repo(owner, repo):
-    if "access_token" not in session:
+    if not current_auth():
         return jsonify({"success": False, "error": "Unauthorized"}), 401
 
     data = request.get_json() or {}
@@ -448,8 +968,9 @@ def delete_repo(owner, repo):
 
 
 @app.route("/repo/<owner>/<repo>/file/upload", methods=["POST"])
+@require_permission("files:write")
 def upload_repo_file(owner, repo):
-    if "access_token" not in session:
+    if not current_auth():
         return jsonify({"success": False, "error": "Unauthorized"}), 401
 
     path = (request.form.get("path") or "").strip().lstrip("/")
@@ -485,8 +1006,9 @@ def upload_repo_file(owner, repo):
 
 
 @app.route("/repo/<owner>/<repo>/file/create", methods=["POST"])
+@require_permission("files:write")
 def create_repo_file(owner, repo):
-    if "access_token" not in session:
+    if not current_auth():
         return jsonify({"success": False, "error": "Unauthorized"}), 401
     data = request.get_json() or {}
     path = (data.get("path") or "").strip().lstrip("/")
@@ -512,8 +1034,9 @@ def create_repo_file(owner, repo):
 
 
 @app.route("/repo/<owner>/<repo>/folder/create", methods=["POST"])
+@require_permission("files:write")
 def create_repo_folder(owner, repo):
-    if "access_token" not in session:
+    if not current_auth():
         return jsonify({"success": False, "error": "Unauthorized"}), 401
     data = request.get_json() or {}
     folder = (data.get("path") or "").strip().strip("/")
@@ -539,9 +1062,71 @@ def create_repo_folder(owner, repo):
     return jsonify({"success": True, "path": folder, "placeholder": keep_path})
 
 
+@app.route("/repo/<owner>/<repo>/file/content")
+@require_permission("files:read")
+def get_repo_file_content(owner, repo):
+    if not current_auth():
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
+    path = (request.args.get("path") or "").strip().lstrip("/")
+    branch = (request.args.get("branch") or "").strip()
+    if not path or path.endswith("/") or ".." in path.split("/"):
+        return jsonify({"success": False, "error": "Enter a valid file path."}), 400
+    params = {"ref": branch} if branch else {}
+    res = requests.get(
+        f"{GITHUB_API_URL}/repos/{owner}/{repo}/contents/{quote(path, safe='/')}",
+        headers=get_headers(), params=params, timeout=15
+    )
+    if res.status_code != 200:
+        return jsonify({"success": False, "error": github_error_message(res, "Could not read file")}), res.status_code
+    data = res.json()
+    if data.get("type") != "file":
+        return jsonify({"success": False, "error": "Selected path is not a file."}), 400
+    try:
+        content = __import__("base64").b64decode((data.get("content") or "").replace("\n", "")).decode("utf-8")
+    except (UnicodeDecodeError, ValueError):
+        return jsonify({"success": False, "error": "This file is binary or is not valid UTF-8 and cannot be edited in the web editor."}), 400
+    return jsonify({"success": True, "path": path, "sha": data.get("sha", ""), "content": content})
+
+
+@app.route("/repo/<owner>/<repo>/file/edit", methods=["POST"])
+@require_permission("files:write")
+def edit_repo_file(owner, repo):
+    if not current_auth():
+        return jsonify({"success": False, "error": "Unauthorized"}), 401
+    data = request.get_json() or {}
+    path = (data.get("path") or "").strip().lstrip("/")
+    branch = (data.get("branch") or "").strip()
+    sha = (data.get("sha") or "").strip()
+    if not path or path.endswith("/") or ".." in path.split("/"):
+        return jsonify({"success": False, "error": "Enter a valid file path."}), 400
+    if not sha:
+        return jsonify({"success": False, "error": "File SHA is required."}), 400
+    try:
+        author_name, author_email = get_commit_author_config(data)
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    payload = {
+        "message": (data.get("commit_message") or f"Update {path}").strip(),
+        "content": __import__("base64").b64encode((data.get("content") or "").encode("utf-8")).decode("ascii"),
+        "sha": sha,
+        "author": {"name": author_name, "email": author_email},
+        "committer": {"name": author_name, "email": author_email},
+    }
+    if branch:
+        payload["branch"] = branch
+    res = requests.put(
+        f"{GITHUB_API_URL}/repos/{owner}/{repo}/contents/{quote(path, safe='/')}",
+        headers=get_headers(), json=payload, timeout=20
+    )
+    if res.status_code not in (200, 201):
+        return jsonify({"success": False, "error": github_error_message(res, "Could not update file")}), res.status_code
+    return jsonify({"success": True, "path": path, "commit": res.json().get("commit", {}).get("sha", "")})
+
+
 @app.route("/repo/<owner>/<repo>/file/delete", methods=["POST"])
+@require_permission("files:delete")
 def delete_repo_file(owner, repo):
-    if "access_token" not in session:
+    if not current_auth():
         return jsonify({"success": False, "error": "Unauthorized"}), 401
     data = request.get_json() or {}
     path = (data.get("path") or "").strip().lstrip("/")
@@ -568,8 +1153,9 @@ def delete_repo_file(owner, repo):
 
 
 @app.route("/repo/<owner>/<repo>/download")
+@require_permission("files:read")
 def download_repo(owner, repo):
-    if "access_token" not in session:
+    if not current_auth():
         return redirect(url_for("index"))
     branch = request.args.get("branch") or "main"
     upstream = requests.get(
@@ -599,8 +1185,9 @@ def download_repo(owner, repo):
 
 
 @app.route("/repo/<owner>/<repo>")
+@require_permission("commits:read")
 def repo_commits(owner, repo):
-    if "access_token" not in session:
+    if not current_auth():
         return redirect(url_for("index"))
 
     headers = get_headers()
@@ -643,11 +1230,12 @@ def repo_commits(owner, repo):
 
 
 @app.route("/api/repo/<owner>/<repo>/commits")
+@require_permission("commits:read")
 def api_commits(owner, repo):
     """
     Ultra-fast real-time JSON endpoint for live polling without delays.
     """
-    if "access_token" not in session:
+    if not current_auth():
         return jsonify({"error": "Unauthorized"}), 401
 
     headers = get_headers()
@@ -691,8 +1279,9 @@ def api_commits(owner, repo):
 
 
 @app.route("/repo/<owner>/<repo>/delete-commits", methods=["POST"])
+@require_permission("commits:write")
 def delete_commits(owner, repo):
-    token = session.get("access_token")
+    token = get_auth_github_token()
     if not token:
         return jsonify({"success": False, "error": "Unauthorized"}), 401
 
@@ -1015,8 +1604,9 @@ def delete_commits(owner, repo):
 
 
 @app.route("/repo/<owner>/<repo>/restore", methods=["POST"])
+@require_permission("commits:write")
 def restore_commit(owner, repo):
-    token = session.get("access_token")
+    token = get_auth_github_token()
     if not token:
         return jsonify({"success": False, "error": "Unauthorized"}), 401
 
@@ -1062,11 +1652,12 @@ def restore_commit(owner, repo):
 
 
 @app.route("/api/repo/<owner>/<repo>/commit/<sha>")
+@require_permission("commits:read")
 def api_commit_detail(owner, repo, sha):
     """
     Returns full commit diff details with file tree, additions (+), and deletions (-).
     """
-    if "access_token" not in session:
+    if not current_auth():
         return jsonify({"error": "Unauthorized"}), 401
 
     headers = get_headers()
@@ -1107,11 +1698,12 @@ def api_commit_detail(owner, repo, sha):
 
 
 @app.route("/repo/<owner>/<repo>/rename-commit", methods=["POST"])
+@require_permission("commits:write")
 def rename_commit(owner, repo):
     """
     Renames any commit message in history while preserving all code, authors, and timestamps.
     """
-    token = session.get("access_token")
+    token = get_auth_github_token()
     if not token:
         return jsonify({"success": False, "error": "Unauthorized"}), 401
 

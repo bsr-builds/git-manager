@@ -25,6 +25,8 @@ jobs:
           DOCKER_CONTAINER: ${{ vars.DOCKER_CONTAINER }}
           GITHUB_CLIENT_ID: ${{ secrets.GH_CLIENT_ID }}
           GITHUB_CLIENT_SECRET: ${{ secrets.GH_CLIENT_SECRET }}
+          GA_CLIENT_ID: ${{ secrets.GA_CLIENT_ID }}
+          GA_CLIENT_SECRET: ${{ secrets.GA_CLIENT_SECRET }}
           FLASK_SECRET_KEY: ${{ secrets.FLASK_SECRET_KEY }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         with:
@@ -32,7 +34,7 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           port: ${{ vars.SERVER_SSH_PORT || '22' }}
-          envs: WORKER_NAME,APP_PORT,GATEKEEPER_PORT,DOCKER_CONTAINER,GITHUB_CLIENT_ID,GITHUB_CLIENT_SECRET,FLASK_SECRET_KEY,CLOUDFLARE_API_TOKEN
+          envs: WORKER_NAME,APP_PORT,GATEKEEPER_PORT,DOCKER_CONTAINER,GITHUB_CLIENT_ID,GITHUB_CLIENT_SECRET,GA_CLIENT_ID,GA_CLIENT_SECRET,FLASK_SECRET_KEY,CLOUDFLARE_API_TOKEN
           script: |
             set -e
 
@@ -57,6 +59,8 @@ jobs:
             DOCKER_CONTAINER="${DOCKER_CONTAINER:-git-manager}" \
             GITHUB_CLIENT_ID="$GITHUB_CLIENT_ID" \
             GITHUB_CLIENT_SECRET="$GITHUB_CLIENT_SECRET" \
+            GA_CLIENT_ID="$GA_CLIENT_ID" \
+            GA_CLIENT_SECRET="$GA_CLIENT_SECRET" \
             FLASK_SECRET_KEY="$FLASK_SECRET_KEY" \
             CLOUDFLARE_API_TOKEN="$CLOUDFLARE_API_TOKEN" \
             bash ./deploy.sh

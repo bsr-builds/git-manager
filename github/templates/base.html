@@ -106,6 +106,9 @@
                         <img src="{{ session['user']['avatar_url'] }}" width="24" height="24" class="rounded-circle me-1 border border-secondary" alt="Avatar">
                         <span class="small d-none d-sm-inline">{{ session['user']['login'] }}</span>
                     </div>
+                    <a href="{{ url_for('manage_tokens') }}" class="btn btn-outline-light btn-sm py-1 px-2 me-1">
+                            <i class="bi bi-key-fill me-1"></i><span class="d-none d-sm-inline">Tokens</span>
+                        </a>
                     <a href="{{ url_for('logout') }}" class="btn btn-outline-light btn-sm py-1 px-2">Logout</a>
                 {% endif %}
             </div>

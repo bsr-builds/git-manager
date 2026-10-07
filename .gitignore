@@ -5,3 +5,6 @@ __pycache__/
 *.pyc
 *.log
 tunnel-url.txt
+
+# Runtime token database
+data/

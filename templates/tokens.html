@@ -1,0 +1,203 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="d-flex flex-column flex-sm-row justify-content-between align-items-start align-items-sm-center gap-2 mb-3">
+    <div>
+        <h4 class="mb-0 fw-bold"><i class="bi bi-key-fill me-1"></i>Access Tokens</h4>
+        <div class="text-muted small">Create scoped Git Manager API tokens for your GitHub account.</div>
+    </div>
+    <div class="d-flex align-items-center gap-2">
+        {% if github_app_connected %}
+        <span class="badge text-bg-success"><i class="bi bi-check-circle me-1"></i>GitHub App: {{ github_app_login or 'Connected' }}</span>
+        <form method="POST" action="{{ url_for('github_app_disconnect') }}">
+            <button class="btn btn-outline-secondary btn-sm">Disconnect App</button>
+        </form>
+        {% elif github_app_configured %}
+        <a class="btn btn-outline-primary btn-sm" href="{{ url_for('github_app_connect') }}"><i class="bi bi-github me-1"></i>Connect GitHub App</a>
+        {% else %}
+        <span class="badge text-bg-warning">GitHub App not configured</span>
+        {% endif %}
+    </div>
+</div>
+
+<div class="card shadow-sm border-0 mb-3">
+    <div class="card-header bg-white fw-semibold">Generate New Token</div>
+    <div class="card-body">
+        <form method="POST" action="{{ url_for('create_app_token') }}">
+            <div class="mb-3">
+                <label class="form-label small fw-semibold">Token type</label>
+                <div class="row g-2">
+                    <div class="col-12 col-md-6">
+                        <label class="border rounded p-2 d-flex gap-2 align-items-start h-100">
+                            <input class="form-check-input mt-1" type="radio" name="token_type" value="normal" checked>
+                            <span><span class="fw-semibold small">GitHub Normal Token</span><span class="d-block text-muted" style="font-size:.72rem">GitHub-issued scoped user token generated through the GitHub API.</span></span>
+                        </label>
+                    </div>
+                    <div class="col-12 col-md-6">
+                        <label class="border rounded p-2 d-flex gap-2 align-items-start h-100">
+                            <input class="form-check-input mt-1" type="radio" name="token_type" value="classic">
+                            <span><span class="fw-semibold small">GitHub Classic Token</span><span class="d-block text-muted" style="font-size:.72rem">GitHub Classic PAT must be created manually in GitHub.</span></span>
+                        </label>
+                    </div>
+                </div>
+            </div>
+            <div class="mb-3">
+                <label class="form-label small fw-semibold">Token name</label>
+                <input type="text" name="name" class="form-control form-control-sm" maxlength="80"
+                       placeholder="e.g. Android App, CI Server" required>
+            </div>
+            <div class="mb-3">
+                <label class="form-label small fw-semibold">Repository access</label>
+                <div class="form-check mb-1">
+                    <input class="form-check-input" type="radio" name="repo_mode" id="repoAll" value="all" checked>
+                    <label class="form-check-label small" for="repoAll">All repositories available to this GitHub account</label>
+                </div>
+                <div class="form-check">
+                    <input class="form-check-input" type="radio" name="repo_mode" id="repoSelected" value="selected">
+                    <label class="form-check-label small" for="repoSelected">Only selected repositories</label>
+                </div>
+                <div id="repoPicker" class="border rounded p-2 mt-2" style="display:none;max-height:220px;overflow:auto;">
+                    {% if repositories %}
+                    <div class="row g-1">
+                    {% for repo in repositories %}
+                        <div class="col-12 col-md-6">
+                            <label class="d-flex align-items-center gap-2 small py-1">
+                                <input class="form-check-input repo-check" type="checkbox" name="repositories" value="{{ repo.name }}">
+                                <span class="text-truncate">{{ repo.full_name }}</span>
+                            </label>
+                        </div>
+                    {% endfor %}
+                    </div>
+                    {% else %}
+                    <div class="text-muted small">No repositories could be loaded. Choose All repositories or refresh after reconnecting GitHub.</div>
+                    {% endif %}
+                </div>
+            </div>
+            <div class="mb-2 small fw-semibold">GitHub permissions</div>
+            <div class="mb-3" id="permissionGroups">
+                {% for group_name, group_permissions in permission_groups.items() %}
+                <div class="border rounded mb-2 permission-group">
+                    <div class="d-flex align-items-center justify-content-between px-2 py-1 bg-light border-bottom">
+                        <span class="fw-semibold small">{{ group_name }}</span>
+                        <button type="button" class="permission-group-check btn btn-sm p-0 d-inline-flex align-items-center justify-content-center"
+                                style="width:16px;height:16px;min-width:16px;font-size:11px;line-height:1;border:1px solid var(--bs-border-color);border-radius:3px;background:#fff;color:transparent;"
+                                aria-label="Select all {{ group_name }} permissions" title="Select all">✓</button>
+                    </div>
+                    <div class="row g-1 p-2">
+                        {% for key, description in group_permissions.items() %}
+                        <div class="col-12 col-md-6">
+                            <label class="d-flex gap-2 align-items-start py-1">
+                                <input class="form-check-input mt-1 permission-check" type="checkbox" name="permissions" value="{{ key }}">
+                                <span>
+                                    <span class="fw-semibold small">{{ key }}</span>
+                                    <span class="d-block text-muted" style="font-size:.72rem">{{ description }}</span>
+                                </span>
+                            </label>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+            <script>
+            const repoAll = document.getElementById('repoAll');
+            const repoSelected = document.getElementById('repoSelected');
+            const repoPicker = document.getElementById('repoPicker');
+            function syncRepoMode() {
+                repoPicker.style.display = repoSelected.checked ? 'block' : 'none';
+                if (!repoSelected.checked) document.querySelectorAll('.repo-check').forEach(b => b.checked = false);
+            }
+            repoAll.addEventListener('change', syncRepoMode);
+            repoSelected.addEventListener('change', syncRepoMode);
+
+            document.querySelectorAll('.permission-group').forEach(group => {
+                const button = group.querySelector('.permission-group-check');
+                const boxes = [...group.querySelectorAll('.permission-check')];
+                const sync = () => {
+                    const checked = boxes.filter(b => b.checked).length;
+                    button.style.color = checked === boxes.length ? 'var(--bs-success)' : 'transparent';
+                    button.style.background = checked === boxes.length ? 'var(--bs-success-bg-subtle)' : '#fff';
+                    button.setAttribute('aria-pressed', checked === boxes.length ? 'true' : 'false');
+                };
+                button.addEventListener('click', () => {
+                    const allChecked = boxes.length > 0 && boxes.every(b => b.checked);
+                    boxes.forEach(b => b.checked = !allChecked);
+                    sync();
+                });
+                boxes.forEach(b => b.addEventListener('change', sync));
+                sync();
+            });
+            </script>
+            <button class="btn btn-primary btn-sm px-3">
+                <i class="bi bi-github me-1"></i>Generate GitHub Token
+            </button>
+        </form>
+    </div>
+</div>
+
+<div class="card shadow-sm border-0">
+    <div class="card-header bg-white fw-semibold">Created Tokens</div>
+    <div class="card-body p-0">
+        {% if tokens %}
+        <div class="table-responsive">
+            <table class="table table-sm align-middle mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th>Name</th>
+                        <th>Type</th>
+                        <th>Token</th>
+                        <th>Allowed Permission</th>
+                        <th>Created</th>
+                        <th>Last Used</th>
+                        <th>Expires</th>
+                        <th>Status</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                {% for t in tokens %}
+                    <tr>
+                        <td class="fw-semibold">{{ t.name }}</td>
+                        <td>
+                            {% if t.token_type == 'classic' %}
+                                <span class="badge text-bg-warning">Classic</span>
+                            {% elif t.token_type == 'github_scoped' %}
+                                <span class="badge text-bg-success">GitHub</span>
+                            {% else %}
+                                <span class="badge text-bg-secondary">Legacy</span>
+                            {% endif %}
+                        </td>
+                        <td><code>{{ t.token_prefix }}</code></td>
+                        <td>
+                            {% for p in t.permissions %}
+                                <span class="badge text-bg-light border me-1 mb-1">{{ p }}</span>
+                            {% endfor %}
+                        </td>
+                        <td class="small">{{ t.created_at|replace('T',' ')|replace('+00:00',' UTC') }}</td>
+                        <td class="small">{{ (t.last_used_at|replace('T',' ')|replace('+00:00',' UTC')) if t.last_used_at else 'Never' }}</td>
+                        <td class="small">{{ (t.expires_at|replace('T',' ')|replace('+00:00',' UTC')) if t.expires_at else '—' }}</td>
+                        <td>
+                            {% if t.revoked_at %}
+                                <span class="badge text-bg-secondary">Revoked</span>
+                            {% else %}
+                                <span class="badge text-bg-success">Active</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if not t.revoked_at %}
+                            <form method="POST" action="{{ url_for('revoke_app_token', token_id=t.id) }}"
+                                  onsubmit="return confirm('Revoke this token? It will stop working immediately.');">
+                                <button class="btn btn-outline-danger btn-sm py-0">Revoke</button>
+                            </form>
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="text-center text-muted small py-4">No tokens created yet.</div>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}
