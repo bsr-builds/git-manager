@@ -39,35 +39,59 @@ jobs:
             SERVER_PATH="${HOME}/git-manager"
             REPO_URL="https://github.com/${{ github.repository }}.git"
 
-            # Recover from deployments previously run as root (or by another
-            # account). Git must be able to write .git/config and create config.lock.
             mkdir -p "$SERVER_PATH"
-            if [ -d "$SERVER_PATH/.git" ]; then
-              if ! test -w "$SERVER_PATH/.git"; then
-                sudo chown -R "$(id -u):$(id -g)" "$SERVER_PATH"
-              fi
-              # A stale lock left by an interrupted Git command blocks config updates.
-              # Only remove it after confirming no Git process is operating here.
-              if ! pgrep -x git >/dev/null 2>&1; then
-                rm -f "$SERVER_PATH/.git/config.lock"
-              fi
+
+            # Repair ownership first. Older deployments may have created .git
+            # as root, leaving the SSH user unable to create .git/config.lock.
+            if command -v sudo >/dev/null 2>&1; then
+              sudo chown -R "$(id -u):$(id -g)" "$SERVER_PATH" || {
+                echo "ERROR: Could not repair ownership for $SERVER_PATH" >&2
+                id
+                ls -ld "$HOME" "$SERVER_PATH" "$SERVER_PATH/.git" 2>/dev/null || true
+                exit 1
+              }
             fi
 
             cd "$SERVER_PATH"
+
+            # If the existing Git metadata remains unwritable, rebuild only the
+            # .git directory. This avoids stale config.lock and bad ownership.
+            if [ -d .git ] && { [ ! -w .git ] || [ ! -w .git/config ]; }; then
+              echo "Git metadata is not writable; recreating .git metadata."
+              if command -v sudo >/dev/null 2>&1; then
+                sudo rm -rf "$SERVER_PATH/.git"
+              else
+                rm -rf "$SERVER_PATH/.git"
+              fi
+            fi
+
             if [ ! -d .git ]; then
               git init
             fi
 
-            # Ensure the repository metadata is writable before changing its remote.
-            if ! test -w .git || ! test -w .git/config; then
-              sudo chown -R "$(id -u):$(id -g)" "$SERVER_PATH"
+            # Diagnose filesystem and lock failures before attempting remote update.
+            if [ -e .git/config.lock ]; then
+              echo "Found stale .git/config.lock; checking for active Git processes."
+              if pgrep -x git >/dev/null 2>&1; then
+                echo "ERROR: A Git process is active; refusing to remove config.lock." >&2
+                pgrep -a git || true
+                exit 1
+              fi
+              rm -f .git/config.lock || {
+                echo "ERROR: Cannot remove .git/config.lock" >&2
+                ls -l .git/config.lock || true
+                exit 1
+              }
             fi
-            test -w .git || {
-              echo "ERROR: $SERVER_PATH/.git is not writable by $(id -un)." >&2
-              ls -ld "$SERVER_PATH" "$SERVER_PATH/.git" "$SERVER_PATH/.git/config" || true
+
+            if [ ! -w .git ] || [ ! -w .git/config ]; then
+              echo "ERROR: Git metadata still is not writable." >&2
+              id
+              ls -ld "$HOME" "$SERVER_PATH" .git .git/config
               df -h "$SERVER_PATH" || true
+              df -i "$SERVER_PATH" || true
               exit 1
-            }
+            fi
 
             if git remote get-url origin >/dev/null 2>&1; then
               git remote set-url origin "$REPO_URL"
@@ -75,9 +99,6 @@ jobs:
               git remote add origin "$REPO_URL"
             fi
 
-            # Fail with useful diagnostics if the filesystem is full/read-only or
-            # Git cannot create its lock file; do not hide the original cause.
-            git config --local --get remote.origin.url >/dev/null
             git fetch --prune origin master
             git checkout -B master origin/master
             git reset --hard origin/master
