@@ -93,10 +93,16 @@ jobs:
               exit 1
             fi
 
-            if git remote get-url origin >/dev/null 2>&1; then
+            # Do not rewrite .git/config on every deployment. The existing
+            # origin is already correct in this repository; calling set-url
+            # unnecessarily creates .git/config.lock and was the failing command.
+            CURRENT_REMOTE="$(git remote get-url origin 2>/dev/null || true)"
+            if [ -z "$CURRENT_REMOTE" ]; then
+              git remote add origin "$REPO_URL"
+            elif [ "$CURRENT_REMOTE" != "$REPO_URL" ]; then
               git remote set-url origin "$REPO_URL"
             else
-              git remote add origin "$REPO_URL"
+              echo "origin already matches $REPO_URL; skipping config rewrite."
             fi
 
             git fetch --prune origin master
