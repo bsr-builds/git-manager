@@ -39,6 +39,57 @@ jobs:
             SERVER_PATH="${HOME}/git-manager"
             REPO_URL="https://github.com/${{ github.repository }}.git"
 
+            # Disk preflight MUST run before Git fetch/unpack, because a full
+            # filesystem causes "No space left on device" during object writes.
+            echo "========== DISK BEFORE CLEANUP =========="
+            df -h "$HOME" || true
+            df -i "$HOME" || true
+            if command -v docker >/dev/null 2>&1 && sudo docker info >/dev/null 2>&1; then
+              echo "========== DOCKER USAGE BEFORE CLEANUP =========="
+              sudo docker system df || true
+
+              DISK_PCT="$(df -P "$HOME" | awk 'NR==2 {gsub(/%/, "", $5); print $5}')"
+              AVAIL_KB="$(df -P "$HOME" | awk 'NR==2 {print $4}')"
+              if [ "${DISK_PCT:-0}" -ge 85 ] || [ "${AVAIL_KB:-999999999}" -lt 2097152 ]; then
+                echo "Disk pressure detected; cleaning only reclaimable Docker data."
+                # First report exactly what is being targeted.
+                sudo docker ps -a --size || true
+                sudo docker images --filter dangling=true || true
+                sudo docker builder du || true
+
+                # Safe scope: stopped containers, dangling images, and build
+                # cache older than 7 days. Never prune volumes or all images.
+                sudo docker container prune -f
+                sudo docker image prune -f
+                sudo docker builder prune -af --filter "until=168h"
+
+                # Truncate only oversized Docker JSON logs (>100 MiB); preserve
+                # the files and container metadata. Do not touch application data.
+                if [ -d /var/lib/docker/containers ]; then
+                  sudo find /var/lib/docker/containers -type f -name '*-json.log' -size +100M -print -exec truncate -s 0 {} \; 2>/dev/null || true
+                fi
+
+                # Package cache is regenerable and does not remove installed packages.
+                sudo apt-get clean || true
+              else
+                echo "Disk usage below cleanup threshold; skipping Docker cleanup."
+              fi
+            else
+              echo "Docker unavailable or not accessible; skipping Docker cleanup."
+            fi
+
+            echo "========== DISK AFTER CLEANUP =========="
+            df -h "$HOME" || true
+            df -i "$HOME" || true
+
+            # Stop early with diagnostics if space is still critically low.
+            AVAIL_KB="$(df -P "$HOME" | awk 'NR==2 {print $4}')"
+            if [ "${AVAIL_KB:-0}" -lt 102400 ]; then
+              echo "ERROR: Less than 100 MiB remains; refusing Git fetch to avoid repository corruption." >&2
+              sudo docker system df || true
+              exit 1
+            fi
+
             mkdir -p "$SERVER_PATH"
 
             # Repair ownership first. Older deployments may have created .git
