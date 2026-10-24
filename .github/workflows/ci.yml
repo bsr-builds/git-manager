@@ -37,15 +37,47 @@ jobs:
             set -e
 
             SERVER_PATH="${HOME}/git-manager"
-            mkdir -p "$SERVER_PATH"
-            cd "$SERVER_PATH"
+            REPO_URL="https://github.com/${{ github.repository }}.git"
 
-            if [ ! -d .git ]; then
-              git init
-              git remote add origin "https://github.com/${{ github.repository }}.git"
+            # Recover from deployments previously run as root (or by another
+            # account). Git must be able to write .git/config and create config.lock.
+            mkdir -p "$SERVER_PATH"
+            if [ -d "$SERVER_PATH/.git" ]; then
+              if ! test -w "$SERVER_PATH/.git"; then
+                sudo chown -R "$(id -u):$(id -g)" "$SERVER_PATH"
+              fi
+              # A stale lock left by an interrupted Git command blocks config updates.
+              # Only remove it after confirming no Git process is operating here.
+              if ! pgrep -x git >/dev/null 2>&1; then
+                rm -f "$SERVER_PATH/.git/config.lock"
+              fi
             fi
 
-            git remote set-url origin "https://github.com/${{ github.repository }}.git"
+            cd "$SERVER_PATH"
+            if [ ! -d .git ]; then
+              git init
+            fi
+
+            # Ensure the repository metadata is writable before changing its remote.
+            if ! test -w .git || ! test -w .git/config; then
+              sudo chown -R "$(id -u):$(id -g)" "$SERVER_PATH"
+            fi
+            test -w .git || {
+              echo "ERROR: $SERVER_PATH/.git is not writable by $(id -un)." >&2
+              ls -ld "$SERVER_PATH" "$SERVER_PATH/.git" "$SERVER_PATH/.git/config" || true
+              df -h "$SERVER_PATH" || true
+              exit 1
+            }
+
+            if git remote get-url origin >/dev/null 2>&1; then
+              git remote set-url origin "$REPO_URL"
+            else
+              git remote add origin "$REPO_URL"
+            fi
+
+            # Fail with useful diagnostics if the filesystem is full/read-only or
+            # Git cannot create its lock file; do not hide the original cause.
+            git config --local --get remote.origin.url >/dev/null
             git fetch --prune origin master
             git checkout -B master origin/master
             git reset --hard origin/master
