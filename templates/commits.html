@@ -639,7 +639,22 @@
                 })
             });
 
-            const result = await response.json();
+            // Read the body once and handle non-JSON proxy errors (for example
+            // Cloudflare 502/524 pages) without masking the actual failure.
+            const responseText = await response.text();
+            let result;
+            try {
+                result = responseText ? JSON.parse(responseText) : {};
+            } catch (_) {
+                const detail = responseText.replace(/\s+/g, ' ').trim().slice(0, 500);
+                throw new Error(`Server returned HTTP ${response.status} instead of JSON${detail ? ': ' + detail : '.'}`);
+            }
+
+            if (!response.ok || !result.success) {
+                const message = result.error || `Request failed with HTTP ${response.status}`;
+                throw new Error(message);
+            }
+
             if (result.success) {
                 document.getElementById('renameFormSection').classList.add('d-none');
                 document.getElementById('renameResult').classList.remove('d-none');
@@ -865,7 +880,8 @@
                 execBtn.innerHTML = 'Confirm & Update GitHub';
             }
         } catch (err) {
-            alert("Network error while updating.");
+            const message = err && err.message ? err.message : String(err);
+            alert("Commit update failed: " + message + "\n\nIf this is a 502/524/timeout, check the app container and Cloudflare Tunnel logs before retrying. The branch may already have been updated; refresh commit history first.");
             execBtn.disabled = false;
             execBtn.innerHTML = 'Confirm & Update GitHub';
         }
